@@ -63,12 +63,12 @@ jobs:
             exit 0
           fi
 
-          # Branch formats (anchored, in priority order):
+          # Branch formats (anchored to start, in priority order):
           #   PROJ-123-free_text   → capture group 1
           if [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]]; then
             KEY="${BASH_REMATCH[1]}"
-          elif [[ "$PR_TITLE" =~ (^|[^A-Z])([A-Z]+-[0-9]+)([^0-9]|$) ]]; then
-            KEY="${BASH_REMATCH[2]}"
+          elif [[ "$PR_TITLE" =~ ^([A-Z]+-[0-9]+)([^0-9]|$) ]]; then
+            KEY="${BASH_REMATCH[1]}"
           fi
 
           if [ -z "$KEY" ]; then

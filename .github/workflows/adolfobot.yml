@@ -96,6 +96,10 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      # ── 0 · Setup ─────────────────────────────
+      - name: Init log files
+        run: touch warnings.log errors.log
+
       # ── 1 · Resolve Jira key (override takes priority) ──────────────────
       - name: "[AdolfoBOT] Resolve Jira key"
         id: jira_key
@@ -131,12 +135,17 @@ jobs:
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
 
-          TRANS=$(curl -sf \
+          HTTP=$(curl -s -o jira_trans.json -w "%{http_code}" \
             -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" \
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
 
-          TRANS_ID=$(echo "$TRANS" | jq -r '
+          if [ "$HTTP" -ne 200 ]; then
+            echo "⚠️  [AdolfoBOT] Failed to fetch transitions for $JIRA_KEY (HTTP $HTTP)" >> warnings.log
+            exit 0
+          fi
+
+          TRANS_ID=$(jq -r '
             .transitions[]
             | select(
                 .name == "ToDo2InProgress"
@@ -144,17 +153,21 @@ jobs:
                 or .to.name == "In Progress"
               )
             | .id
-          ' | head -1)
+          ' jira_trans.json | head -1)
 
           if [ -n "$TRANS_ID" ]; then
-            curl -sf -X POST \
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
               -u "$JIRA_EMAIL:$JIRA_TOKEN" \
               -H "Content-Type: application/json" \
               -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
-              "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
-            echo "✅ [AdolfoBOT] Transitioned $JIRA_KEY → In Progress"
+              "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
+            if [ "$HTTP" -eq 204 ] || [ "$HTTP" -eq 200 ]; then
+              echo "✅ [AdolfoBOT] Transitioned $JIRA_KEY → In Progress"
+            else
+              echo "⚠️  [AdolfoBOT] Failed to transition $JIRA_KEY (HTTP $HTTP)" >> warnings.log
+            fi
           else
-            echo "⚠️  [AdolfoBOT] No 'In Progress' transition available for $JIRA_KEY (available: $(echo \"$TRANS\" | jq -r '[.transitions[].name] | join(\", \")'))"
+            echo "⚠️  [AdolfoBOT] No 'In Progress' transition available for $JIRA_KEY (available: $(jq -r '[.transitions[].name] | join(\", \")' jira_trans.json))"
           fi
 
       # ── 3 · Post Jira comment ─────────────────────────────────────────────
@@ -202,7 +215,7 @@ jobs:
           if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
             echo "✅ [AdolfoBOT] Comment posted to $JIRA_KEY"
           else
-            echo "⚠️  [AdolfoBOT] Failed to post comment to $JIRA_KEY (HTTP $HTTP)"
+            echo "⚠️  [AdolfoBOT] Failed to post comment to $JIRA_KEY (HTTP $HTTP)" >> warnings.log
           fi
 
       # ── 4 · Step summary ─────────────────────────────────────────────────
