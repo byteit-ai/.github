@@ -176,23 +176,7 @@ jobs:
               "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
             echo "✅ Transitioned $JIRA_KEY: 'Review' → 'In Progress' (changes requested by $REVIEWER)"
           fi
-
-          # ── Post review summary comment to Jira ──
-          # Read review body safely from the event payload (avoids shell-injection from $ {{ }} substitution)
-          REVIEW_BODY=$(jq -r '.review.body // ""' "$GITHUB_EVENT_PATH")
-          if [ -n "$REVIEW_BODY" ]; then
-            PAYLOAD=$(jq -n \
-              --arg reviewer "$REVIEWER" \
-              --arg body "$REVIEW_BODY" \
-              '{body: {version: 1, type: "doc", content: [{type: "paragraph", content: [{type: "text", text: ("🔄 Changes requested by " + $reviewer + ":\n\n" + $body)}]}]}}')
-            curl -sf -X POST \
-              -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "$PAYLOAD" \
-              "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/comment" || \
-              echo "⚠️  Failed to post review comment to Jira" >> warnings.log
-            echo "✅ Posted review summary comment to $JIRA_KEY"
-          fi
+          # Comment posting delegated to AdolfoBOT (post-review-comment job below)
 
       # ── 3 · Blocking dependencies must be DONE ─
       - name: "3 · Jira dependencies"
@@ -413,7 +397,7 @@ jobs:
 
           echo "## 🔀 Conflict Check — $CONFLICT_COUNT conflicting PR(s) found" >> "$GITHUB_STEP_SUMMARY"
 
-  # ── AdolfoBOT — move issue back to In Progress on failure ───────────────
+  # ── AdolfoBOT — move issue back to In Progress on workflow failure ───────
   notify-failure:
     name: AdolfoBOT — Notify Failure
     needs: [jira-guard]
@@ -421,5 +405,44 @@ jobs:
     uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
     with:
       workflow_name: "Jira Guard"
+    secrets: inherit
+
+  # ── AdolfoBOT — post review-changes comment to Jira ──────────────────────
+  # Step 1: read review body from event payload (requires a regular job step)
+  prepare-review-comment:
+    name: AdolfoBOT — Prepare Review Comment
+    if: github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
+    runs-on: ubuntu-latest
+    outputs:
+      jira_key:     ${{ steps.extract.outputs.key }}
+      comment_body: ${{ steps.extract.outputs.comment }}
+    steps:
+      - id: extract
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REVIEWER: ${{ github.event.review.user.login }}
+        run: |
+          KEY=""
+          [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]] && KEY="${BASH_REMATCH[1]}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          REVIEW_BODY=$(jq -r '.review.body // ""' "$GITHUB_EVENT_PATH")
+          {
+            echo "comment<<DELIMEOF"
+            printf "🔄 Changes requested by %s\n\n%s" "$REVIEWER" "$REVIEW_BODY"
+            echo ""
+            echo "DELIMEOF"
+          } >> "$GITHUB_OUTPUT"
+
+  # Step 2: delegate to AdolfoBOT for the actual Jira comment post
+  post-review-comment:
+    name: AdolfoBOT — Post Review Comment
+    needs: [prepare-review-comment]
+    if: always() && needs.prepare-review-comment.result == 'success' && needs.prepare-review-comment.outputs.jira_key != ''
+    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+    with:
+      workflow_name: "Jira Guard"
+      mode: "comment"
+      jira_key_override: ${{ needs.prepare-review-comment.outputs.jira_key }}
+      comment_body: ${{ needs.prepare-review-comment.outputs.comment_body }}
     secrets: inherit
 

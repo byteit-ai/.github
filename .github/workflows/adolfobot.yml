@@ -1,15 +1,23 @@
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  AdolfoBOT — Reusable workflow failure handler
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Decorator-style reusable workflow to call at the end of any workflow.
-#  On invocation (always triggered with `if: failure()` by the caller),
-#  this workflow:
-#    1. Derives the Jira issue key from the PR/branch ref.
-#    2. Transitions the issue back to "In Progress".
-#    3. Posts a Jira comment with the workflow name, run URL, and
-#       optional extra context lines provided by the caller.
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║                     🤖  A D O L F O B O T                       ║
+# ║          Centralised Jira notifier for all ByteIT workflows      ║
+# ╚══════════════════════════════════════════════════════════════════╝
 #
-#  Usage in any workflow (add as a final job):
+#  AdolfoBOT is the single place that posts Jira comments and rolls
+#  issues back to "In Progress" across every workflow in this repo.
+#  Never duplicate Jira comment / transition logic inside a workflow —
+#  delegate to AdolfoBOT instead.
+#
+#  Modes
+#  ─────
+#  failure (default) — triggered with `if: failure()` as a final job.
+#    Transitions the issue back to In Progress and posts a failure
+#    summary with the run URL and optional extra context.
+#
+#  comment — post any informational comment to Jira without a
+#    status transition. Pass jira_key_override + comment_body.
+#
+#  Usage — failure mode (add as last job in any workflow):
 #
 #    notify-failure:
 #      name: AdolfoBOT — Notify Failure
@@ -18,13 +26,34 @@
 #      uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
 #      with:
 #        workflow_name: "My Workflow"
-#        extra_context: |          # optional per-workflow explanation
+#        extra_context: |          # optional per-workflow hint
 #          - Step X failed because Y
-#          - Check Z for details
 #      secrets: inherit
 #
-#  Debug: set repo secret ACTIONS_STEP_DEBUG=true for verbose runner logs.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Usage — comment mode (post a Jira comment from any job):
+#
+#    post-my-comment:
+#      name: AdolfoBOT — Post Comment
+#      needs: [prepare-step]   # job that outputs jira_key + comment
+#      uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+#      with:
+#        workflow_name: "My Workflow"
+#        mode: "comment"
+#        jira_key_override: ${{ needs.prepare-step.outputs.jira_key }}
+#        comment_body: ${{ needs.prepare-step.outputs.comment }}
+#      secrets: inherit
+#
+#  ⚠️  BYPASS POLICY
+#  Bypassing any automated workflow must be a deliberate exception,
+#  not a shortcut. Every bypass requires explicit manual approval
+#  from a team lead before merging. This rule exists to protect
+#  everyone: a skipped check today becomes a production incident
+#  tomorrow, costing far more time for the whole team than fixing the
+#  root issue would have. When pipelines stay green, reviews are
+#  faster, deployments are safer, and nobody gets woken up at 2am. 🙏
+#
+#  Debug: set repo secret ACTIONS_STEP_DEBUG=true for verbose logs.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 name: AdolfoBOT
 
 on:
@@ -35,7 +64,19 @@ on:
         type: string
         required: true
       extra_context:
-        description: "Optional per-workflow explanation lines added to the Jira comment"
+        description: "Optional per-workflow explanation lines added to the Jira comment (failure mode)"
+        type: string
+        default: ""
+      mode:
+        description: "'failure' — transition to In Progress + post failure message. 'comment' — post comment_body only, no transition."
+        type: string
+        default: "failure"
+      jira_key_override:
+        description: "Explicit Jira key, skipping branch-name auto-detection. Required for mode=comment."
+        type: string
+        default: ""
+      comment_body:
+        description: "Full comment text when mode=comment. Ignored in failure mode (failure message is auto-built)."
         type: string
         default: ""
       jira_domain:
@@ -55,46 +96,46 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      # ── 1 · Derive Jira key from branch / PR ref ──────────────────────────
-      - name: Derive Jira key
+      # ── 1 · Resolve Jira key (override takes priority) ──────────────────
+      - name: "[AdolfoBOT] Resolve Jira key"
         id: jira_key
         env:
+          KEY_OVERRIDE: ${{ inputs.jira_key_override }}
           # PR events populate head.ref; push events populate ref_name
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
+          if [ -n "$KEY_OVERRIDE" ]; then
+            echo "key=$KEY_OVERRIDE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           BRANCH="${HEAD_REF:-$REF_NAME}"
           KEY=""
           if [[ "$BRANCH" =~ ^([A-Z]+-[0-9]+)(-|$) ]]; then
             KEY="${BASH_REMATCH[1]}"
           fi
           if [ -z "$KEY" ]; then
-            echo "⚠️  No Jira key found in branch '$BRANCH' — skipping Jira update"
+            echo "⚠️  No Jira key found in branch '$BRANCH' and no override provided — skipping Jira update"
           fi
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
 
-      # ── 2 · Transition to In Progress + post comment ──────────────────────
-      - name: Transition to In Progress and post failure comment
-        if: steps.jira_key.outputs.key != ''
+      # ── 2 · Transition to In Progress (failure mode only) ─────────────────
+      - name: "[AdolfoBOT] Transition to In Progress"
+        if: steps.jira_key.outputs.key != '' && inputs.mode == 'failure'
         env:
-          JIRA_KEY:      ${{ steps.jira_key.outputs.key }}
-          JIRA_EMAIL:    ${{ secrets.JIRA_EMAIL }}
-          JIRA_TOKEN:    ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_DOMAIN:   ${{ inputs.jira_domain }}
-          WORKFLOW_NAME: ${{ inputs.workflow_name }}
-          EXTRA_CONTEXT: ${{ inputs.extra_context }}
-          RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JIRA_KEY:    ${{ steps.jira_key.outputs.key }}
+          JIRA_EMAIL:  ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN:  ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN: ${{ inputs.jira_domain }}
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
 
-          # ── Resolve "In Progress" transition id ──────────────────────────
           TRANS=$(curl -sf \
             -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" \
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
 
-          # Accept any named or destination-matched "In Progress" transition
           TRANS_ID=$(echo "$TRANS" | jq -r '
             .transitions[]
             | select(
@@ -111,26 +152,42 @@ jobs:
               -H "Content-Type: application/json" \
               -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
               "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
-            echo "✅ Transitioned $JIRA_KEY → In Progress"
+            echo "✅ [AdolfoBOT] Transitioned $JIRA_KEY → In Progress"
           else
-            echo "⚠️  No 'In Progress' transition available for $JIRA_KEY (available: $(echo \"$TRANS\" | jq -r '[.transitions[].name] | join(\", \")'))"
+            echo "⚠️  [AdolfoBOT] No 'In Progress' transition available for $JIRA_KEY (available: $(echo \"$TRANS\" | jq -r '[.transitions[].name] | join(\", \")'))"
           fi
 
-          # ── Build comment text ────────────────────────────────────────────
-          COMMENT="❌ *${WORKFLOW_NAME}* failed on GitHub Actions.\n\n→ [View run](${RUN_URL})"
-          if [ -n "$EXTRA_CONTEXT" ]; then
-            COMMENT="${COMMENT}\n\n---\n${EXTRA_CONTEXT}"
+      # ── 3 · Post Jira comment ─────────────────────────────────────────────
+      - name: "[AdolfoBOT] Post Jira comment"
+        if: steps.jira_key.outputs.key != ''
+        env:
+          JIRA_KEY:      ${{ steps.jira_key.outputs.key }}
+          JIRA_EMAIL:    ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN:    ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN:   ${{ inputs.jira_domain }}
+          MODE:          ${{ inputs.mode }}
+          WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          EXTRA_CONTEXT: ${{ inputs.extra_context }}
+          COMMENT_BODY:  ${{ inputs.comment_body }}
+          RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
+
+          if [ "$MODE" = "comment" ]; then
+            # comment mode — use comment_body as-is
+            COMMENT="$COMMENT_BODY"
+          else
+            # failure mode — build standard failure message
+            COMMENT="❌ *${WORKFLOW_NAME}* failed on GitHub Actions.\n\n→ [View run](${RUN_URL})"
+            if [ -n "$EXTRA_CONTEXT" ]; then
+              COMMENT="${COMMENT}\n\n---\n${EXTRA_CONTEXT}"
+            fi
           fi
 
-          # ── Post comment to Jira (ADF format) ────────────────────────────
           PAYLOAD=$(jq -n --arg text "$COMMENT" '{
             body: {
-              version: 1,
-              type: "doc",
-              content: [{
-                type: "paragraph",
-                content: [{ type: "text", text: $text }]
-              }]
+              version: 1, type: "doc",
+              content: [{ type: "paragraph", content: [{ type: "text", text: $text }] }]
             }
           }')
 
@@ -141,25 +198,27 @@ jobs:
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/comment")
 
           if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
-            echo "✅ Failure comment posted to $JIRA_KEY"
+            echo "✅ [AdolfoBOT] Comment posted to $JIRA_KEY"
           else
-            echo "⚠️  Failed to post comment to $JIRA_KEY (HTTP $HTTP)"
+            echo "⚠️  [AdolfoBOT] Failed to post comment to $JIRA_KEY (HTTP $HTTP)"
           fi
 
-      # ── 3 · Step summary ─────────────────────────────────────────────────
-      - name: Summary
+      # ── 4 · Step summary ─────────────────────────────────────────────────
+      - name: "[AdolfoBOT] Summary"
         if: always()
         env:
           JIRA_KEY:      ${{ steps.jira_key.outputs.key }}
           WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          MODE:          ${{ inputs.mode }}
           RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           JIRA_DOMAIN:   ${{ inputs.jira_domain }}
         run: |
           {
-            echo "## 🤖 AdolfoBOT — Failure Handler"
+            echo "## 🤖 AdolfoBOT"
             echo ""
             echo "| Field | Value |"
             echo "|-------|-------|"
+            echo "| Mode | \`${MODE}\` |"
             echo "| Calling workflow | \`${WORKFLOW_NAME}\` |"
             echo "| Jira key | \`${JIRA_KEY:-n/a}\` |"
             echo "| Jira URL | ${JIRA_KEY:+https://${JIRA_DOMAIN}/browse/${JIRA_KEY}} |"
