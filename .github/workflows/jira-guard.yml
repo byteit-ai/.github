@@ -413,3 +413,13 @@ jobs:
 
           echo "## 🔀 Conflict Check — $CONFLICT_COUNT conflicting PR(s) found" >> "$GITHUB_STEP_SUMMARY"
 
+  # ── AdolfoBOT — move issue back to In Progress on failure ───────────────
+  notify-failure:
+    name: AdolfoBOT — Notify Failure
+    needs: [jira-guard]
+    if: failure()
+    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+    with:
+      workflow_name: "Jira Guard"
+    secrets: inherit
+

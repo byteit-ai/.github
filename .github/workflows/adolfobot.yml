@@ -1,0 +1,167 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AdolfoBOT — Reusable workflow failure handler
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Decorator-style reusable workflow to call at the end of any workflow.
+#  On invocation (always triggered with `if: failure()` by the caller),
+#  this workflow:
+#    1. Derives the Jira issue key from the PR/branch ref.
+#    2. Transitions the issue back to "In Progress".
+#    3. Posts a Jira comment with the workflow name, run URL, and
+#       optional extra context lines provided by the caller.
+#
+#  Usage in any workflow (add as a final job):
+#
+#    notify-failure:
+#      name: AdolfoBOT — Notify Failure
+#      needs: [<your-job-name>]
+#      if: failure()
+#      uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+#      with:
+#        workflow_name: "My Workflow"
+#        extra_context: |          # optional per-workflow explanation
+#          - Step X failed because Y
+#          - Check Z for details
+#      secrets: inherit
+#
+#  Debug: set repo secret ACTIONS_STEP_DEBUG=true for verbose runner logs.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+name: AdolfoBOT
+
+on:
+  workflow_call:
+    inputs:
+      workflow_name:
+        description: "Human-readable name of the calling workflow (used in Jira comment)"
+        type: string
+        required: true
+      extra_context:
+        description: "Optional per-workflow explanation lines added to the Jira comment"
+        type: string
+        default: ""
+      jira_domain:
+        description: "Jira cloud domain (e.g. mycompany.atlassian.net)"
+        type: string
+        default: "byteit-ai.atlassian.net"
+    secrets:
+      JIRA_EMAIL:
+        required: true
+      JIRA_API_TOKEN:
+        required: true
+
+jobs:
+  adolfobot:
+    name: AdolfoBOT — Notify Failure
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # ── 1 · Derive Jira key from branch / PR ref ──────────────────────────
+      - name: Derive Jira key
+        id: jira_key
+        env:
+          # PR events populate head.ref; push events populate ref_name
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
+          BRANCH="${HEAD_REF:-$REF_NAME}"
+          KEY=""
+          if [[ "$BRANCH" =~ ^([A-Z]+-[0-9]+)(-|$) ]]; then
+            KEY="${BASH_REMATCH[1]}"
+          fi
+          if [ -z "$KEY" ]; then
+            echo "⚠️  No Jira key found in branch '$BRANCH' — skipping Jira update"
+          fi
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      # ── 2 · Transition to In Progress + post comment ──────────────────────
+      - name: Transition to In Progress and post failure comment
+        if: steps.jira_key.outputs.key != ''
+        env:
+          JIRA_KEY:      ${{ steps.jira_key.outputs.key }}
+          JIRA_EMAIL:    ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN:    ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN:   ${{ inputs.jira_domain }}
+          WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          EXTRA_CONTEXT: ${{ inputs.extra_context }}
+          RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
+
+          # ── Resolve "In Progress" transition id ──────────────────────────
+          TRANS=$(curl -sf \
+            -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
+
+          # Accept any named or destination-matched "In Progress" transition
+          TRANS_ID=$(echo "$TRANS" | jq -r '
+            .transitions[]
+            | select(
+                .name == "ToDo2InProgress"
+                or .name == "Review2InProgress"
+                or .to.name == "In Progress"
+              )
+            | .id
+          ' | head -1)
+
+          if [ -n "$TRANS_ID" ]; then
+            curl -sf -X POST \
+              -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
+              "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
+            echo "✅ Transitioned $JIRA_KEY → In Progress"
+          else
+            echo "⚠️  No 'In Progress' transition available for $JIRA_KEY (available: $(echo \"$TRANS\" | jq -r '[.transitions[].name] | join(\", \")'))"
+          fi
+
+          # ── Build comment text ────────────────────────────────────────────
+          COMMENT="❌ *${WORKFLOW_NAME}* failed on GitHub Actions.\n\n→ [View run](${RUN_URL})"
+          if [ -n "$EXTRA_CONTEXT" ]; then
+            COMMENT="${COMMENT}\n\n---\n${EXTRA_CONTEXT}"
+          fi
+
+          # ── Post comment to Jira (ADF format) ────────────────────────────
+          PAYLOAD=$(jq -n --arg text "$COMMENT" '{
+            body: {
+              version: 1,
+              type: "doc",
+              content: [{
+                type: "paragraph",
+                content: [{ type: "text", text: $text }]
+              }]
+            }
+          }')
+
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/comment")
+
+          if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
+            echo "✅ Failure comment posted to $JIRA_KEY"
+          else
+            echo "⚠️  Failed to post comment to $JIRA_KEY (HTTP $HTTP)"
+          fi
+
+      # ── 3 · Step summary ─────────────────────────────────────────────────
+      - name: Summary
+        if: always()
+        env:
+          JIRA_KEY:      ${{ steps.jira_key.outputs.key }}
+          WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JIRA_DOMAIN:   ${{ inputs.jira_domain }}
+        run: |
+          {
+            echo "## 🤖 AdolfoBOT — Failure Handler"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Calling workflow | \`${WORKFLOW_NAME}\` |"
+            echo "| Jira key | \`${JIRA_KEY:-n/a}\` |"
+            echo "| Jira URL | ${JIRA_KEY:+https://${JIRA_DOMAIN}/browse/${JIRA_KEY}} |"
+            echo "| Run URL | ${RUN_URL} |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -130,4 +130,16 @@ jobs:
             exit 1
           fi
 
+  # ── AdolfoBOT — move issue back to In Progress on failure ───────────────
+  notify-failure:
+    name: AdolfoBOT — Notify Failure
+    needs: [lint]
+    if: failure()
+    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+    with:
+      workflow_name: "Lint"
+      extra_context: |
+        Run `ruff check .` and `ruff format --check .` locally to reproduce.
+    secrets: inherit
+
 
