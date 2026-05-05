@@ -183,7 +183,7 @@ jobs:
               COMMENT="${COMMENT}\n\n---\n${EXTRA_CONTEXT}"
             fi
             # Append bypass policy footnote
-            COMMENT="${COMMENT}\n\n---\n_ℹ️ Bypassing requires team-lead approval. Green pipelines = faster reviews, safer deploys. 🙏_"
+            COMMENT="${COMMENT}\n\n---\n_ℹ️ Exceptionally, bypassing is possible with AdolfoNonBOT approval. Having full green pipelines = faster dev & reviews, safer deploys. 🙏_"
           fi
 
           PAYLOAD=$(jq -n --arg text "$COMMENT" '{
