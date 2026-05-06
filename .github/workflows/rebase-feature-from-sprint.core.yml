@@ -125,4 +125,17 @@ jobs:
             echo "| Status | ✅ Rebased successfully |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ── AdolfoBOT — move issue back to In Progress on failure ───────────────
+  notify-failure:
+    name: AdolfoBOT — Notify Failure
+    needs: [rebase-feature-from-sprint]
+    if: failure()
+    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+    with:
+      workflow_name: "Rebase Feature from Sprint"
+      extra_context: |
+        The rebase likely failed due to conflicts. Resolve locally with:
+        `git fetch origin <sprint-branch> && git rebase origin/<sprint-branch>`
+    secrets: inherit
+
 

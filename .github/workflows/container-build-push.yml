@@ -217,3 +217,15 @@ jobs:
             echo "| Environment | \`${{ steps.resolve.outputs.env_prefix || 'n/a' }}\` |"
             echo "| Cache scope | \`${{ inputs.cache_key_prefix }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── AdolfoBOT — move issue back to In Progress on failure ───────────────
+  notify-failure:
+    name: AdolfoBOT — Notify Failure
+    needs: [build-push]
+    if: failure()
+    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+    with:
+      workflow_name: "Container Build & Push"
+      extra_context: |
+        Check the build logs for Docker or AWS credential failures.
+    secrets: inherit
