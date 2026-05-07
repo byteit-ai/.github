@@ -85,9 +85,9 @@ on:
         default: "byteit-ai.atlassian.net"
     secrets:
       JIRA_EMAIL:
-        required: true
+        required: false
       JIRA_API_TOKEN:
-        required: true
+        required: false
 
 jobs:
   adolfobot:
@@ -99,6 +99,20 @@ jobs:
       # ── 0 · Setup ─────────────────────────────
       - name: Init log files
         run: touch warnings.log errors.log
+
+      - name: "[AdolfoBOT] Check Jira credentials"
+        id: jira_creds
+        env:
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+        run: |
+          [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
+          if [ -n "$JIRA_EMAIL" ] && [ -n "$JIRA_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️  [AdolfoBOT] Jira secrets are missing (JIRA_EMAIL/JIRA_API_TOKEN) — Jira transition/comment steps will be skipped" >> warnings.log
+          fi
 
       # ── 1 · Resolve Jira key (override takes priority) ──────────────────
       - name: "[AdolfoBOT] Resolve Jira key"
@@ -127,7 +141,7 @@ jobs:
       # ── 2 · Fetch Jira assignee ───────────────────────────────────────────
       - name: "[AdolfoBOT] Fetch Jira assignee"
         id: assignee
-        if: steps.jira_key.outputs.key != ''
+        if: steps.jira_key.outputs.key != '' && steps.jira_creds.outputs.available == 'true'
         env:
           JIRA_KEY:    ${{ steps.jira_key.outputs.key }}
           JIRA_EMAIL:  ${{ secrets.JIRA_EMAIL }}
@@ -150,7 +164,7 @@ jobs:
 
       # ── 3 · Transition to In Progress (failure mode only) ─────────────────
       - name: "[AdolfoBOT] Transition to In Progress"
-        if: steps.jira_key.outputs.key != '' && inputs.mode == 'failure'
+        if: steps.jira_key.outputs.key != '' && inputs.mode == 'failure' && steps.jira_creds.outputs.available == 'true'
         env:
           JIRA_KEY:    ${{ steps.jira_key.outputs.key }}
           JIRA_EMAIL:  ${{ secrets.JIRA_EMAIL }}
@@ -196,7 +210,7 @@ jobs:
 
       # ── 4 · Post Jira comment ─────────────────────────────────────────────
       - name: "[AdolfoBOT] Post Jira comment"
-        if: steps.jira_key.outputs.key != ''
+        if: steps.jira_key.outputs.key != '' && steps.jira_creds.outputs.available == 'true'
         env:
           JIRA_KEY:      ${{ steps.jira_key.outputs.key }}
           JIRA_EMAIL:    ${{ secrets.JIRA_EMAIL }}
@@ -292,6 +306,7 @@ jobs:
           JIRA_KEY:      ${{ steps.jira_key.outputs.key }}
           WORKFLOW_NAME: ${{ inputs.workflow_name }}
           MODE:          ${{ inputs.mode }}
+          JIRA_CREDS:    ${{ steps.jira_creds.outputs.available }}
           RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           JIRA_DOMAIN:   ${{ inputs.jira_domain }}
         run: |
@@ -302,7 +317,12 @@ jobs:
             echo "|-------|-------|"
             echo "| Mode | \`${MODE}\` |"
             echo "| Calling workflow | \`${WORKFLOW_NAME}\` |"
+            echo "| Jira secrets available | \`${JIRA_CREDS}\` |"
             echo "| Jira key | \`${JIRA_KEY:-n/a}\` |"
             echo "| Jira URL | ${JIRA_KEY:+https://${JIRA_DOMAIN}/browse/${JIRA_KEY}} |"
             echo "| Run URL | ${RUN_URL} |"
+            if [ "${JIRA_CREDS}" != "true" ]; then
+              echo ""
+              echo "⚠️ Jira actions were skipped because required secrets are not configured in the caller repository."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
