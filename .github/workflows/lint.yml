@@ -81,7 +81,7 @@ jobs:
           # Exclude docs / config / lock files, migrations, and test files from line counts
           STATS=$(git diff --numstat "origin/$BASE_REF"..."$HEAD_SHA" \
             -- . ':!*.md' ':!*.txt' ':!*.json' ':!*.yml' ':!*.yaml' ':!*.lock' \
-               ':!**/migrations/**' ':!**/test_*.py' \
+               ':!**/migrations/**' ':!**/test_*.py' ':!api_schema.yml' ':!api-docs-redocly.html' \
             2>/dev/null || true)
 
           ADD=0; DEL=0; FILES=0
