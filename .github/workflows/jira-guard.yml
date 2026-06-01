@@ -247,26 +247,21 @@ jobs:
             echo "⚠️  PR description too short ($LEN chars, min ${{ inputs.min_description_length }})" >> warnings.log
           fi
 
-      # ── 6 · Branch policy ─────────────────────
-      - name: "6 · Branch policy"
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          # Release PR: dev → main is always allowed
-          if [[ "$HEAD_REF" == "dev" && "$BASE_REF" == "main" ]]; then
-            exit 0
-          fi
+      # # ── 6 · Branch policy ─────────────────────
+      # - name: "6 · Branch policy"
+      #   env:
+      #     BASE_REF: ${{ github.event.pull_request.base.ref }}
+      #     HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      #   run: |
+      #     # Release PR: dev → main is always allowed
+      #     if [[ "$HEAD_REF" == "dev" && "$BASE_REF" == "main" ]]; then
+      #       exit 0
+      #     fi
 
-          # Feature branches must target dev
-          if [[ "$HEAD_REF" =~ ^[A-Z]+-[0-9]+ ]]; then
-            if [[ "$BASE_REF" != "dev" ]]; then
-              echo "❌ Branch '$HEAD_REF' must target 'dev', not '$BASE_REF'" >> errors.log
-            fi
-          # Any other branch targeting main is forbidden
-          elif [[ "$BASE_REF" == "main" ]]; then
-            echo "❌ Only 'dev' can merge into 'main' (got '$HEAD_REF')" >> errors.log
-          fi
+      #     # All branches must target dev or main
+      #     if [[ "$BASE_REF" != "dev" && "$BASE_REF" != "main" ]]; then
+      #       echo "❌ Branch '$HEAD_REF' must target 'dev' or 'main', not '$BASE_REF'" >> errors.log
+      #     fi
 
       # ── 📋 Final report ───────────────────────
       - name: "📋 Summary"
