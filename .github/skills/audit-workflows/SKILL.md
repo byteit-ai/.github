@@ -31,7 +31,7 @@ Every repo MUST have:
 - `lint.yml` (shared ruff for Python repos, custom for TS repos)
 
 Repos with a root `pytest.ini` MUST also have:
-- `pytest-unit.yml` → calls `byteit-ai/.github/.github/workflows/pytest-unit.yml@main`
+- `tests-unit.yml` → calls `byteit-ai/.github/.github/workflows/tests-unit.yml@main`
 
 Container repos (saint-mary, web-dotdollar, ml-factory) MUST also have:
 - `container.caller.yml` → keeps repo-specific detect/matrix logic local and delegates actual image builds to `container-build-push.yml@main`

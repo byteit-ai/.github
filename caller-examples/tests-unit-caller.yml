@@ -1,6 +1,6 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Copy this file to each Python repo:
-#    .github/workflows/pytest-unit.yml
+#    .github/workflows/tests-unit.yml
 #
 #  Purpose:
 #  - Run unit tests only (tests/unit) in PRs and pushes to dev/main
@@ -27,14 +27,14 @@ on:
       - "pytest.ini"
 
 concurrency:
-  group: pytest-unit-${{ github.ref }}
+  group: tests-unit-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  pytest-unit:
+  tests-unit:
     permissions:
       contents: read
-    uses: byteit-ai/.github/.github/workflows/pytest-unit.yml@main
+    uses: byteit-ai/.github/.github/workflows/tests-unit.yml@main
     with:
       python_version: "3.12"
     secrets: inherit
