@@ -10,7 +10,7 @@ name: Pytest Unit
 
 on:
   pull_request:
-    branches: [dev, main]
+    branches: [main]
     paths:
       - "tests/**"
       - "src/**"
@@ -18,7 +18,7 @@ on:
       - "pyproject.toml"
       - "pytest.ini"
   push:
-    branches: [dev, main]
+    branches: [main]
     paths:
       - "tests/**"
       - "src/**"

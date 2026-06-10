@@ -6,8 +6,7 @@
 #
 #  Caller must trigger on:
 #    pull_request: [opened, synchronize, reopened, closed]
-#    pull_request_review: [submitted]   ← required for "changes requested" → In Progress
-#    push: [dev, main, sprint*]         ← required for conflict detection
+#    pull_request_review: [changes_requested]   ← required for "changes requested" → In Progress
 #  Debug: set repo secret ACTIONS_STEP_DEBUG=true for verbose runner logs.
 #  Shell scripts honour $RUNNER_DEBUG via set -x automatically.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -293,10 +292,10 @@ jobs:
             exit 1
           fi
 
-  # ── Conflict scanner — runs on push only ─────────────────────────────────
+  # ── Conflict scanner — runs on PR close only ────────────────────────────
   conflict-check:
     name: Conflict Check
-    if: github.event_name == 'push'
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
