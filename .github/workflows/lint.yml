@@ -12,6 +12,10 @@ name: Lint
 on:
   workflow_call:
     inputs:
+      linter:
+        description: "Linter to use: ruff (Python) | eslint (JS/TS) | all"
+        type: string
+        default: "ruff"
       max_lines_warn:
         description: "Soft limit — total changed lines"
         type: number
@@ -32,9 +36,9 @@ on:
 
 jobs:
   lint:
-    name: Lint (ruff)
+    name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -45,7 +49,9 @@ jobs:
       - name: Init log files
         run: touch errors.log warnings.log
 
+      # ── Ruff linter (Python) ──────────────────────
       - name: Checkout shared ruff config
+        if: inputs.linter == 'ruff' || inputs.linter == 'all'
         uses: actions/checkout@v4
         with:
           repository: byteit-ai/github-workflows
@@ -53,20 +59,39 @@ jobs:
           sparse-checkout: ruff.toml
 
       - name: Install Ruff
+        if: inputs.linter == 'ruff' || inputs.linter == 'all'
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
           pip install ruff==0.15.2
           ruff --version
 
       - name: Ruff — lint
+        if: inputs.linter == 'ruff' || inputs.linter == 'all'
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
           ruff check . --config .github-workflows/ruff.toml --output-format=github
 
       - name: Ruff — format check
+        if: inputs.linter == 'ruff' || inputs.linter == 'all'
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
           ruff format . --check --config .github-workflows/ruff.toml
+
+      # ── ESLint (JS/TS) ────────────────────────────
+      - name: Setup Node.js
+        if: inputs.linter == 'eslint' || inputs.linter == 'all'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install npm dependencies
+        if: inputs.linter == 'eslint' || inputs.linter == 'all'
+        run: npm ci
+
+      - name: ESLint
+        if: inputs.linter == 'eslint' || inputs.linter == 'all'
+        run: npx eslint --max-warnings 0 --format stylish
 
       # ── PR size — lines & files ────────────
       - name: PR size
@@ -137,9 +162,10 @@ jobs:
     if: failure() && github.event_name == 'pull_request' && github.run_attempt == 1
     uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
     with:
-      workflow_name: "Lint"
+      workflow_name: "Lint (${{ inputs.linter }})"
       extra_context: |
-        Run `ruff check .` and `ruff format --check .` locally to reproduce.
+        Linter ${{ inputs.linter }} failed.
+        Run the relevant linter locally to reproduce before pushing again.
     secrets: inherit
 
 
