@@ -230,7 +230,7 @@ jobs:
           FLAGGED=""
           while IFS= read -r FILE; do
             [ -z "$FILE" ] && continue
-            BASENAME=$(basename "$FILE")
+            BASENAME=$(basename -- "$FILE")
             if [[ "$BASENAME" =~ $DENY ]]; then
               FLAGGED="${FLAGGED}  • ${FILE}\n"
             fi
