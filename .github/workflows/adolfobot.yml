@@ -291,8 +291,8 @@ jobs:
                   content.append(p(t(line)))
             content.append(rule())
             content.append(p(em(
-              "ℹ️ Exceptionally, bypassing is possible with AdolfoNonBOT approval. "
-              "Having full green pipelines = faster dev & reviews, safer deploys. 🙏"
+              "ℹ️ Exceptions require explicit AdolfoNonBOT approval. "
+              "✅ Green pipelines = safer deploys, stable releases, and fewer surprises. 🚀"
             )))
 
           adf = {"version": 1, "type": "doc", "content": content}
