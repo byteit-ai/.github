@@ -33,9 +33,11 @@ on:
 jobs:
   jira-guard:
     name: Jira Guard
-    if: github.event_name != 'push'
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      jira_key: ${{ steps.jira_key.outputs.key }}
 
     steps:
       # ── 0 · Setup ─────────────────────────────
@@ -54,21 +56,32 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          GIT_EVENT: ${{ github.event_name }}
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
           KEY=""
-          # dev → main is a release PR — no Jira key required
-          if [[ "$HEAD_REF" == "dev" && "$BASE_REF" == "main" ]]; then
-            echo "key=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
 
-          # Branch formats (anchored to start, in priority order):
-          #   PROJ-123-free_text   → capture group 1
-          if [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]]; then
-            KEY="${BASH_REMATCH[1]}"
-          elif [[ "$PR_TITLE" =~ ^([A-Z]+-[0-9]+)([^0-9]|$) ]]; then
-            KEY="${BASH_REMATCH[1]}"
+          if [ "$GIT_EVENT" = "push" ]; then
+            # On push (PR merged), extract Jira key from merge commit message
+            # Format: "Merge pull request #N from user/PROJ-123-fix"
+            if [[ "$HEAD_COMMIT_MSG" =~ ([A-Z]+-[0-9]+) ]]; then
+              KEY="${BASH_REMATCH[1]}"
+            fi
+          else
+            # dev → main is a release PR — no Jira key required
+            if [[ "$HEAD_REF" == "dev" && "$BASE_REF" == "main" ]]; then
+              echo "key=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            # Branch formats (anchored to start, in priority order):
+            #   PROJ-123-free_text   → capture group 1
+            if [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]]; then
+              KEY="${BASH_REMATCH[1]}"
+            elif [[ "$PR_TITLE" =~ ^([A-Z]+-[0-9]+)([^0-9]|$) ]]; then
+              KEY="${BASH_REMATCH[1]}"
+            fi
           fi
 
           if [ -z "$KEY" ]; then
@@ -76,8 +89,8 @@ jobs:
           fi
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
 
-      # ── 2 · Jira issue exists · status = In Progress or Review ─
-      - name: "2 · Jira issue & status"
+      # ── 2 · Transition to Review (PR opened/reopened/synchronized) ─
+      - name: "2 · Transition to Review"
         if: steps.jira_key.outputs.key != '' && github.event_name == 'pull_request' && github.event.action != 'closed'
         env:
           JIRA_KEY: ${{ steps.jira_key.outputs.key }}
@@ -98,7 +111,6 @@ jobs:
           STATUS=$(jq -r '.fields.status.name' jira_response.json)
 
           if [ "$STATUS" == "In Progress" ]; then
-            # Auto-transition to Review using only .to.name
             TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
               -H "Accept: application/json" \
               "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
@@ -117,9 +129,21 @@ jobs:
             echo "❌ Issue status is '$STATUS', expected 'In Progress' or 'Review'" >> errors.log
           fi
 
-      # ── 2b · Transition to DONE on PR merge ──────
-      - name: "2b · Transition to DONE on merge"
-        if: steps.jira_key.outputs.key != '' && github.event.action == 'closed' && github.event.pull_request.merged == true
+      # ── 2 · Output transition for Review comment ──
+      - name: "2 · Output Review transition context"
+        id: review_transition
+        if: steps.jira_key.outputs.key != '' && github.event_name == 'pull_request' && github.event.action != 'closed'
+        run: |
+          TRANSITIONED="false"
+          if [ -f jira_response.json ]; then
+            STATUS=$(jq -r '.fields.status.name' jira_response.json 2>/dev/null || echo "")
+            [ "$STATUS" == "In Progress" ] && TRANSITIONED="true"
+          fi
+          echo "transitioned=$TRANSITIONED" >> "$GITHUB_OUTPUT"
+
+      # ── 2b · Transition to DONE on push (PR merged → main) ──
+      - name: "2b · Transition to DONE"
+        if: steps.jira_key.outputs.key != '' && github.event_name == 'push'
         env:
           JIRA_KEY: ${{ steps.jira_key.outputs.key }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
@@ -149,8 +173,15 @@ jobs:
             echo "✅ Transitioned $JIRA_KEY: '$FROM_STATUS' → 'Done'"
           fi
 
-      # ── 2c · Transition to Review on changes requested ──
-      - name: "2c · Transition to Review on changes requested"
+      # ── 2b · Output Done transition context ──
+      - name: "2b · Output Done transition context"
+        id: done_transition
+        if: steps.jira_key.outputs.key != '' && github.event_name == 'push'
+        run: |
+          echo "transitioned=true" >> "$GITHUB_OUTPUT"
+
+      # ── 2c · Transition to In Progress on changes requested ──
+      - name: "2c · Transition to In Progress (changes requested)"
         if: steps.jira_key.outputs.key != '' && github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
         env:
           JIRA_KEY: ${{ steps.jira_key.outputs.key }}
@@ -159,28 +190,47 @@ jobs:
           JIRA_DOMAIN: ${{ inputs.jira_domain }}
           REVIEWER: ${{ github.event.review.user.login }}
         run: |
-          # Fetch current status
           ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" \
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY?fields=status")
           FROM_STATUS=$(echo "$ISSUE" | jq -r '.fields.status.name')
 
-          # Find transition to Review using only .to.name
           TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" \
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
-          TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="Review") | .id' | head -1)
+          TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="In Progress") | .id' | head -1)
           if [ -z "$TRANS_ID" ]; then
-            echo "⚠️  Could not find a transition to 'Review' for $JIRA_KEY (available: $(echo "$TRANS" | jq -r '[.transitions[].name] | join(", ")'))" >> warnings.log
+            echo "⚠️  Could not find a transition to 'In Progress' for $JIRA_KEY (available: $(echo "$TRANS" | jq -r '[.transitions[].name] | join(\", \")'))" >> warnings.log
           else
             curl -sf -X POST \
               -u "$JIRA_EMAIL:$JIRA_TOKEN" \
               -H "Content-Type: application/json" \
               -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
               "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
-            echo "✅ Transitioned $JIRA_KEY: '$FROM_STATUS' → 'Review' (changes requested by $REVIEWER)"
+            echo "✅ Transitioned $JIRA_KEY: '$FROM_STATUS' → 'In Progress' (changes requested by $REVIEWER)"
           fi
-          # Comment posting delegated to AdolfoBOT (post-review-comment job below)
+          # Comment posting delegated to AdolfoBOT job below
+
+      # ── 2c · Output In Progress transition context ──
+      - name: "2c · Output In Progress transition context"
+        id: inprogress_transition
+        if: steps.jira_key.outputs.key != '' && github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
+        env:
+          JIRA_KEY: ${{ steps.jira_key.outputs.key }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN: ${{ inputs.jira_domain }}
+          REVIEWER: ${{ github.event.review.user.login }}
+        run: |
+          echo "transitioned=true" >> "$GITHUB_OUTPUT"
+          echo "reviewer=$REVIEWER" >> "$GITHUB_OUTPUT"
+          COMMENT=$(printf "🔄 Changes requested by %s. Issue moved back to In Progress." "$REVIEWER")
+          {
+            echo "comment_body<<DELIMEOF"
+            printf "%s" "$COMMENT"
+            echo ""
+            echo "DELIMEOF"
+          } >> "$GITHUB_OUTPUT"
 
       # ── 3 · Blocking dependencies must be DONE ─
       - name: "3 · Jira dependencies"
@@ -218,6 +268,7 @@ jobs:
 
       # ── 4 · Sensitive / secret file scan ───────
       - name: "4 · Sensitive file scan"
+        if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -243,6 +294,7 @@ jobs:
 
       # ── 5 · PR description ────────────────────
       - name: "5 · PR description"
+        if: github.event_name == 'pull_request'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
@@ -270,7 +322,14 @@ jobs:
       # ── 📋 Final report ───────────────────────
       - name: "📋 Summary"
         if: always()
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_REF: ${{ github.ref }}
         run: |
+          BRANCH_DISPLAY="${HEAD_REF:-${PUSH_REF}}"
+          BASE_DISPLAY="${BASE_REF:-}"
+          [ -n "$BASE_DISPLAY" ] && BRANCH_DISPLAY="${BRANCH_DISPLAY} → ${BASE_DISPLAY}"
           (
             echo "## 🛡️ Jira Guard"
             echo ""
@@ -278,7 +337,7 @@ jobs:
             echo "|-------|-------|"
             echo "| Jira key | \`${{ steps.jira_key.outputs.key || 'n/a' }}\` |"
             echo "| Event | \`${{ github.event_name }}\` / \`${{ github.event.action }}\` |"
-            echo "| Branch | \`${{ github.event.pull_request.head.ref }}\` → \`${{ github.event.pull_request.base.ref }}\` |"
+            echo "| Ref | \`$BRANCH_DISPLAY\` |"
             echo ""
             if [ -s warnings.log ]; then
               echo "### ⚠️  Warnings"
@@ -407,11 +466,11 @@ jobs:
       workflow_name: "Jira Guard"
     secrets: inherit
 
-  # ── AdolfoBOT — post review-changes comment to Jira ──────────────────────
-  # Step 1: read review body from event payload (requires a regular job step)
+  # ── AdolfoBOT — post Review transition comment (PR opened/reopened) ──
   prepare-review-comment:
     name: AdolfoBOT — Prepare Review Comment
-    if: github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    needs: [jira-guard]
     runs-on: ubuntu-latest
     outputs:
       jira_key:     ${{ steps.extract.outputs.key }}
@@ -420,48 +479,9 @@ jobs:
       - id: extract
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          REVIEWER: ${{ github.event.review.user.login }}
-        run: |
-          KEY=""
-          [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]] && KEY="${BASH_REMATCH[1]}"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-          REVIEW_BODY=$(jq -r '.review.body // ""' "$GITHUB_EVENT_PATH")
-          {
-            echo "comment<<DELIMEOF"
-            printf "🔄 Changes requested by %s\n\n%s" "$REVIEWER" "$REVIEW_BODY"
-            echo ""
-            echo "DELIMEOF"
-          } >> "$GITHUB_OUTPUT"
-
-  # Step 2: delegate to AdolfoBOT for the actual Jira comment post
-  post-review-comment:
-    name: AdolfoBOT — Post Review Comment
-    needs: [prepare-review-comment]
-    if: always() && needs.prepare-review-comment.result == 'success' && needs.prepare-review-comment.outputs.jira_key != ''
-    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
-    with:
-      workflow_name: "Jira Guard"
-      mode: "comment"
-      jira_key_override: ${{ needs.prepare-review-comment.outputs.jira_key }}
-      comment_body: ${{ needs.prepare-review-comment.outputs.comment_body }}
-    secrets: inherit
-
-  # ── AdolfoBOT — post Done-on-merge comment with assignee + reviewer mentions ──
-  prepare-done-comment:
-    name: AdolfoBOT — Prepare Done Comment
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    outputs:
-      jira_key: ${{ steps.extract.outputs.key }}
-      comment_body: ${{ steps.extract.outputs.comment }}
-    steps:
-      - id: extract
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_DOMAIN: ${{ inputs.jira_domain }}
@@ -488,9 +508,137 @@ jobs:
             REVIEWER_ID=$(echo "$ISSUE_ALL" | jq -r ".fields.\"$REVIEWER_FIELD\" // empty" | head -1)
           fi
 
-          COMMENT="PR merged and issue transitioned to Done."
-          COMMENT+="\nPR: #${PR_NUMBER} — ${PR_TITLE} (${PR_URL})"
-          COMMENT+="\nMerged by: ${MERGED_BY}"
+          COMMENT="PR opened — issue moved to Review."
+          COMMENT+="\nPR: #${PR_NUMBER} — ${PR_TITLE}"
+          COMMENT+="\nAuthor: ${PR_AUTHOR}"
+          [ -n "$ASSIGNEE_ID" ] && COMMENT+="\nAssigned to: [~accountid:${ASSIGNEE_ID}]"
+          [ -n "$REVIEWER_ID" ] && COMMENT+="\nReviewer: [~accountid:${REVIEWER_ID}]"
+          {
+            echo "comment<<DELIMEOF"
+            echo -e "$COMMENT"
+            echo "DELIMEOF"
+          } >> "$GITHUB_OUTPUT"
+
+  post-review-comment:
+    name: AdolfoBOT — Post Review Comment
+    needs: [prepare-review-comment]
+    if: always() && needs.prepare-review-comment.result == 'success' && needs.prepare-review-comment.outputs.jira_key != ''
+    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+    with:
+      workflow_name: "Jira Guard"
+      mode: "comment"
+      jira_key_override: ${{ needs.prepare-review-comment.outputs.jira_key }}
+      comment_body: ${{ needs.prepare-review-comment.outputs.comment_body }}
+    secrets: inherit
+
+  # ── AdolfoBOT — post In Progress transition comment (changes requested) ──
+  prepare-inprogress-comment:
+    name: AdolfoBOT — Prepare In Progress Comment
+    if: github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
+    runs-on: ubuntu-latest
+    outputs:
+      jira_key:     ${{ steps.extract.outputs.key }}
+      comment_body: ${{ steps.extract.outputs.comment }}
+    steps:
+      - id: extract
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REVIEWER: ${{ github.event.review.user.login }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN: ${{ inputs.jira_domain }}
+        run: |
+          KEY=""
+          [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]] && KEY="${BASH_REMATCH[1]}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          [ -z "$KEY" ] && exit 0
+
+          ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=assignee")
+          ASSIGNEE_ID=$(echo "$ISSUE" | jq -r '.fields.assignee.accountId // ""')
+
+          ALL_FIELDS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/field" 2>/dev/null)
+          REVIEWER_FIELD=$(echo "$ALL_FIELDS" | jq -r '.[] | select(.name=="Reviewer") | .id' | head -1)
+          REVIEWER_ID=""
+          if [ -n "$REVIEWER_FIELD" ]; then
+            ISSUE_ALL=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+              -H "Accept: application/json" \
+              "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=$REVIEWER_FIELD")
+            REVIEWER_ID=$(echo "$ISSUE_ALL" | jq -r ".fields.\"$REVIEWER_FIELD\" // empty" | head -1)
+          fi
+
+          REVIEW_BODY=$(jq -r '.review.body // ""' "$GITHUB_EVENT_PATH")
+          COMMENT=$(printf "🔄 Changes requested by %s. Issue moved back to In Progress." "$REVIEWER")
+          if [ -n "$REVIEW_BODY" ]; then
+            COMMENT="$COMMENT\n\nReview notes: $REVIEW_BODY"
+          fi
+          [ -n "$ASSIGNEE_ID" ] && COMMENT+="\nAssigned to: [~accountid:${ASSIGNEE_ID}]"
+          [ -n "$REVIEWER_ID" ] && COMMENT+="\nReviewer: [~accountid:${REVIEWER_ID}]"
+          {
+            echo "comment<<DELIMEOF"
+            echo -e "$COMMENT"
+            echo "DELIMEOF"
+          } >> "$GITHUB_OUTPUT"
+
+  post-inprogress-comment:
+    name: AdolfoBOT — Post In Progress Comment
+    needs: [prepare-inprogress-comment]
+    if: always() && needs.prepare-inprogress-comment.result == 'success' && needs.prepare-inprogress-comment.outputs.jira_key != ''
+    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+    with:
+      workflow_name: "Jira Guard"
+      mode: "comment"
+      jira_key_override: ${{ needs.prepare-inprogress-comment.outputs.jira_key }}
+      comment_body: ${{ needs.prepare-inprogress-comment.outputs.comment_body }}
+    secrets: inherit
+
+  # ── AdolfoBOT — post Done-on-push comment with assignee + reviewer mentions ──
+  prepare-done-comment:
+    name: AdolfoBOT — Prepare Done Comment
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      jira_key: ${{ steps.extract.outputs.key }}
+      comment_body: ${{ steps.extract.outputs.comment }}
+    steps:
+      - id: extract
+        env:
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN: ${{ inputs.jira_domain }}
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+          PUSHER: ${{ github.event.pusher.name }}
+          REF: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          KEY=""
+          [[ "$HEAD_COMMIT_MSG" =~ ([A-Z]+-[0-9]+) ]] && KEY="${BASH_REMATCH[1]}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          [ -z "$KEY" ] && exit 0
+
+          ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=assignee")
+          ASSIGNEE_ID=$(echo "$ISSUE" | jq -r '.fields.assignee.accountId // ""')
+
+          ALL_FIELDS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/field" 2>/dev/null)
+          REVIEWER_FIELD=$(echo "$ALL_FIELDS" | jq -r '.[] | select(.name=="Reviewer") | .id' | head -1)
+          REVIEWER_ID=""
+          if [ -n "$REVIEWER_FIELD" ]; then
+            ISSUE_ALL=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+              -H "Accept: application/json" \
+              "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=$REVIEWER_FIELD")
+            REVIEWER_ID=$(echo "$ISSUE_ALL" | jq -r ".fields.\"$REVIEWER_FIELD\" // empty" | head -1)
+          fi
+
+          COMMENT="Code merged and issue transitioned to Done."
+          COMMENT+="\nBranch: ${REF}"
+          COMMENT+="\nPushed by: ${PUSHER}"
           [ -n "$ASSIGNEE_ID" ] && COMMENT+="\nAssigned to: [~accountid:${ASSIGNEE_ID}]"
           [ -n "$REVIEWER_ID" ] && COMMENT+="\nReviewer: [~accountid:${REVIEWER_ID}]"
           {
