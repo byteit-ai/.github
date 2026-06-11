@@ -215,22 +215,8 @@ jobs:
       - name: "2c · Output In Progress transition context"
         id: inprogress_transition
         if: steps.jira_key.outputs.key != '' && github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
-        env:
-          JIRA_KEY: ${{ steps.jira_key.outputs.key }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_DOMAIN: ${{ inputs.jira_domain }}
-          REVIEWER: ${{ github.event.review.user.login }}
         run: |
           echo "transitioned=true" >> "$GITHUB_OUTPUT"
-          echo "reviewer=$REVIEWER" >> "$GITHUB_OUTPUT"
-          COMMENT=$(printf "🔄 Changes requested by %s. Issue moved back to In Progress." "$REVIEWER")
-          {
-            echo "comment_body<<DELIMEOF"
-            printf "%s" "$COMMENT"
-            echo ""
-            echo "DELIMEOF"
-          } >> "$GITHUB_OUTPUT"
 
       # ── 3 · Blocking dependencies must be DONE ─
       - name: "3 · Jira dependencies"
@@ -482,37 +468,13 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_DOMAIN: ${{ inputs.jira_domain }}
         run: |
           KEY=""
           [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]] && KEY="${BASH_REMATCH[1]}"
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
           [ -z "$KEY" ] && exit 0
 
-          ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -H "Accept: application/json" \
-            "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=assignee")
-          ASSIGNEE_ID=$(echo "$ISSUE" | jq -r '.fields.assignee.accountId // ""')
-
-          ALL_FIELDS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -H "Accept: application/json" \
-            "https://$JIRA_DOMAIN/rest/api/3/field" 2>/dev/null)
-          REVIEWER_FIELD=$(echo "$ALL_FIELDS" | jq -r '.[] | select(.name=="Reviewer") | .id' | head -1)
-          REVIEWER_ID=""
-          if [ -n "$REVIEWER_FIELD" ]; then
-            ISSUE_ALL=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-              -H "Accept: application/json" \
-              "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=$REVIEWER_FIELD")
-            REVIEWER_ID=$(echo "$ISSUE_ALL" | jq -r ".fields.\"$REVIEWER_FIELD\" // empty" | head -1)
-          fi
-
-          COMMENT="PR opened — issue moved to Review."
-          COMMENT+="\nPR: #${PR_NUMBER} — ${PR_TITLE}"
-          COMMENT+="\nAuthor: ${PR_AUTHOR}"
-          [ -n "$ASSIGNEE_ID" ] && COMMENT+="\nAssigned to: [~accountid:${ASSIGNEE_ID}]"
-          [ -n "$REVIEWER_ID" ] && COMMENT+="\nReviewer: [~accountid:${REVIEWER_ID}]"
+          COMMENT=$(printf "PR #%s opened (In Progress → Review).\nAuthor: %s\nPR: %s" "$PR_NUMBER" "$PR_AUTHOR" "$PR_TITLE")
           {
             echo "comment<<DELIMEOF"
             echo -e "$COMMENT"
@@ -544,39 +506,17 @@ jobs:
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           REVIEWER: ${{ github.event.review.user.login }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_DOMAIN: ${{ inputs.jira_domain }}
         run: |
           KEY=""
           [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]] && KEY="${BASH_REMATCH[1]}"
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
           [ -z "$KEY" ] && exit 0
 
-          ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -H "Accept: application/json" \
-            "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=assignee")
-          ASSIGNEE_ID=$(echo "$ISSUE" | jq -r '.fields.assignee.accountId // ""')
-
-          ALL_FIELDS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -H "Accept: application/json" \
-            "https://$JIRA_DOMAIN/rest/api/3/field" 2>/dev/null)
-          REVIEWER_FIELD=$(echo "$ALL_FIELDS" | jq -r '.[] | select(.name=="Reviewer") | .id' | head -1)
-          REVIEWER_ID=""
-          if [ -n "$REVIEWER_FIELD" ]; then
-            ISSUE_ALL=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-              -H "Accept: application/json" \
-              "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=$REVIEWER_FIELD")
-            REVIEWER_ID=$(echo "$ISSUE_ALL" | jq -r ".fields.\"$REVIEWER_FIELD\" // empty" | head -1)
-          fi
-
           REVIEW_BODY=$(jq -r '.review.body // ""' "$GITHUB_EVENT_PATH")
-          COMMENT=$(printf "🔄 Changes requested by %s. Issue moved back to In Progress." "$REVIEWER")
+          COMMENT=$(printf "🔄 Changes requested by %s — issue moved back to In Progress." "$REVIEWER")
           if [ -n "$REVIEW_BODY" ]; then
-            COMMENT="$COMMENT\n\nReview notes: $REVIEW_BODY"
+            COMMENT="$COMMENT\n\nReview notes:\n$REVIEW_BODY"
           fi
-          [ -n "$ASSIGNEE_ID" ] && COMMENT+="\nAssigned to: [~accountid:${ASSIGNEE_ID}]"
-          [ -n "$REVIEWER_ID" ] && COMMENT+="\nReviewer: [~accountid:${REVIEWER_ID}]"
           {
             echo "comment<<DELIMEOF"
             echo -e "$COMMENT"
@@ -606,41 +546,16 @@ jobs:
     steps:
       - id: extract
         env:
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_DOMAIN: ${{ inputs.jira_domain }}
           HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
           PUSHER: ${{ github.event.pusher.name }}
           REF: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
         run: |
           KEY=""
           [[ "$HEAD_COMMIT_MSG" =~ ([A-Z]+-[0-9]+) ]] && KEY="${BASH_REMATCH[1]}"
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
           [ -z "$KEY" ] && exit 0
 
-          ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -H "Accept: application/json" \
-            "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=assignee")
-          ASSIGNEE_ID=$(echo "$ISSUE" | jq -r '.fields.assignee.accountId // ""')
-
-          ALL_FIELDS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-            -H "Accept: application/json" \
-            "https://$JIRA_DOMAIN/rest/api/3/field" 2>/dev/null)
-          REVIEWER_FIELD=$(echo "$ALL_FIELDS" | jq -r '.[] | select(.name=="Reviewer") | .id' | head -1)
-          REVIEWER_ID=""
-          if [ -n "$REVIEWER_FIELD" ]; then
-            ISSUE_ALL=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-              -H "Accept: application/json" \
-              "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY?fields=$REVIEWER_FIELD")
-            REVIEWER_ID=$(echo "$ISSUE_ALL" | jq -r ".fields.\"$REVIEWER_FIELD\" // empty" | head -1)
-          fi
-
-          COMMENT="Code merged and issue transitioned to Done."
-          COMMENT+="\nBranch: ${REF}"
-          COMMENT+="\nPushed by: ${PUSHER}"
-          [ -n "$ASSIGNEE_ID" ] && COMMENT+="\nAssigned to: [~accountid:${ASSIGNEE_ID}]"
-          [ -n "$REVIEWER_ID" ] && COMMENT+="\nReviewer: [~accountid:${REVIEWER_ID}]"
+          COMMENT=$(printf "Code merged to %s — issue moved to Done.\nPushed by: %s" "$REF" "$PUSHER")
           {
             echo "comment<<DELIMEOF"
             echo -e "$COMMENT"
