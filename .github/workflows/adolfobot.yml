@@ -161,7 +161,7 @@ jobs:
       # ── 2 · Fetch Jira assignee ───────────────────────────────────────────
       - name: "[AdolfoBOT] Fetch Jira assignee"
         id: assignee
-        if: steps.jira_key.outputs.key != '' && steps.jira_creds.outputs.available == 'true' && steps.notify_policy.outputs.allowed == 'true'
+        if: steps.jira_key.outputs.key != '' && steps.jira_creds.outputs.available == 'true'
         env:
           JIRA_KEY:    ${{ steps.jira_key.outputs.key }}
           JIRA_EMAIL:  ${{ secrets.JIRA_EMAIL }}
@@ -184,7 +184,7 @@ jobs:
 
       # ── 3 · Transition to In Progress (failure mode only) ─────────────────
       - name: "[AdolfoBOT] Transition to In Progress"
-        if: steps.jira_key.outputs.key != '' && inputs.mode == 'failure' && steps.jira_creds.outputs.available == 'true' && steps.notify_policy.outputs.allowed == 'true'
+        if: steps.jira_key.outputs.key != '' && inputs.mode == 'failure' && steps.jira_creds.outputs.available == 'true'
         env:
           JIRA_KEY:    ${{ steps.jira_key.outputs.key }}
           JIRA_EMAIL:  ${{ secrets.JIRA_EMAIL }}
@@ -205,11 +205,7 @@ jobs:
 
           TRANS_ID=$(jq -r '
             .transitions[]
-            | select(
-                .name == "ToDo2InProgress"
-                or .name == "Review2InProgress"
-                or .to.name == "In Progress"
-              )
+            | select(.to.name == "In Progress")
             | .id
           ' jira_trans.json | head -1)
 
