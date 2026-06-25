@@ -1,0 +1,106 @@
+name: PR Agent
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: '"full" (opened/reopened) or "update" (synchronize)'
+        type: string
+        required: true
+    secrets:
+      LLM_API_KEY:
+        required: true
+      LLM_API_BASE:
+        required: true
+      LLM_MODEL:
+        required: true
+
+jobs:
+  pr-agent:
+    name: PR Agent (${{ inputs.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Shallow clone depth optimized for accurate diff computation without full history
+          fetch-depth: 20
+
+      - name: Run PR Agent
+        uses: the-pr-agent/pr-agent@main
+        env:
+          OPENAI__KEY: ${{ secrets.LLM_API_KEY }}
+          OPENAI__API_BASE: ${{ secrets.LLM_API_BASE }}
+
+          CONFIG__MODEL: ${{ secrets.LLM_MODEL }}
+          CONFIG__FALLBACK_MODELS: ${{ secrets.LLM_MODEL }}
+
+          # Keep output minimal and structured
+          CONFIG__VERBOSITY_LEVEL: "0"
+          CONFIG__PUBLISH_OUTPUT_PROGRESS: "false"
+
+          # Deterministic outputs for consistent reviews
+          CONFIG__TEMPERATURE: "0"
+
+          # Balanced token limit for PRs between 200–1000 lines
+          CONFIG__MAX_MODEL_TOKENS: "16000"
+
+          # Prevent long-running LLM calls from blocking CI
+          CONFIG__AI_TIMEOUT: "60"
+
+          # -----------------------------
+          # Review configuration
+          # -----------------------------
+
+          # Disable non-essential review dimensions to reduce noise and cost
+          PR_REVIEWER__REQUIRE_SCORE_REVIEW: "false"
+          PR_REVIEWER__REQUIRE_TESTS_REVIEW: "false"
+          PR_REVIEWER__REQUIRE_ESTIMATE_EFFORT_TO_REVIEW: "false"
+          PR_REVIEWER__REQUIRE_CAN_BE_SPLIT_REVIEW: "false"
+          PR_REVIEWER__REQUIRE_ESTIMATE_CONTRIBUTION_TIME_COST: "false"
+          PR_REVIEWER__REQUIRE_TODO_SCAN: "false"
+          PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW: "false"
+
+          # Keep only security-focused review enabled
+          PR_REVIEWER__REQUIRE_SECURITY_REVIEW: "true"
+
+          # Limit findings to focus only on high-impact issues
+          PR_REVIEWER__NUM_MAX_FINDINGS: "4"
+
+          # Disable verbose UI elements in comments
+          PR_REVIEWER__ENABLE_INTRO_TEXT: "false"
+          PR_REVIEWER__ENABLE_HELP_TEXT: "false"
+          PR_REVIEWER__FINAL_UPDATE_MESSAGE: "false"
+
+          # Use a single persistent comment updated over time
+          PR_REVIEWER__PERSISTENT_COMMENT: "true"
+
+          # -----------------------------
+          # Code suggestions configuration
+          # -----------------------------
+
+          # Focus only on real issues instead of stylistic suggestions
+          PR_CODE_SUGGESTIONS__FOCUS_ONLY_ON_PROBLEMS: "true"
+
+          # Limit suggestions per code chunk to reduce noise
+          PR_CODE_SUGGESTIONS__NUM_CODE_SUGGESTIONS_PER_CHUNK: "2"
+
+          # Prevent multiple expensive LLM passes over the same diff
+          PR_CODE_SUGGESTIONS__MAX_NUMBER_OF_CALLS: "1"
+
+          # Disable extended multi-pass refinement mode
+          PR_CODE_SUGGESTIONS__AUTO_EXTENDED_MODE: "false"
+
+          # -----------------------------
+          # GitHub integration
+          # -----------------------------
+
+          GITHUB_TOKEN: ${{ github.token }}
+
+          # Run auto-review only on PR creation/reopen, not on every push
+          github_action_config.auto_review: ${{ inputs.mode == 'full' && 'true' || 'false' }}
+
+          # Disable additional AI features to reduce cost and noise
+          github_action_config.auto_describe: "false"
+          github_action_config.auto_improve: "false"
