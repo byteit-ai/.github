@@ -49,6 +49,10 @@ jobs:
           # Prevent long-running LLM calls from blocking CI
           CONFIG__AI_TIMEOUT: "60"
 
+          # Custom model (DeepInfra/DeepSeek) — not in PR Agent's built-in token map
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "32000"
+          CONFIG__MODEL_TOKEN_COUNT_ESTIMATE_FACTOR: "0.5"
+
           # -----------------------------
           # Review configuration
           # -----------------------------
