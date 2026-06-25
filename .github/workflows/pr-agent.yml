@@ -30,6 +30,8 @@ jobs:
       - name: Run PR Agent
         uses: the-pr-agent/pr-agent@main
         env:
+          # ALIAS for PR Agent's internal check — same value as OPENAI__KEY
+          OPENAI_KEY: ${{ secrets.LLM_API_KEY }}
           OPENAI__KEY: ${{ secrets.LLM_API_KEY }}
           OPENAI__API_BASE: ${{ secrets.LLM_API_BASE }}
 

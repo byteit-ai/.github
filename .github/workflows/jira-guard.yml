@@ -475,18 +475,6 @@ jobs:
       LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
       LLM_MODEL: ${{ secrets.LLM_MODEL }}
 
-  pr-agent-update:
-    name: PR Agent (incremental)
-    needs: [jira-guard]
-    if: github.event_name == 'pull_request' && github.event.action == 'synchronize' && inputs.pr_agent_enabled
-    uses: ./.github/workflows/pr-agent.yml
-    with:
-      mode: "update"
-    secrets:
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-      LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
-      LLM_MODEL: ${{ secrets.LLM_MODEL }}
-
   # ── AdolfoBOT — post Review transition comment (PR opened/reopened) ──
   prepare-review-comment:
     name: AdolfoBOT — Prepare Review Comment
