@@ -53,7 +53,7 @@ jobs:
           # Review configuration
           # -----------------------------
 
-          # Disable non-essential review dimensions to reduce noise and cost
+          # Disable all review dimensions except security (for full mode)
           PR_REVIEWER__REQUIRE_SCORE_REVIEW: "false"
           PR_REVIEWER__REQUIRE_TESTS_REVIEW: "false"
           PR_REVIEWER__REQUIRE_ESTIMATE_EFFORT_TO_REVIEW: "false"
@@ -62,8 +62,9 @@ jobs:
           PR_REVIEWER__REQUIRE_TODO_SCAN: "false"
           PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW: "false"
 
-          # Keep only security-focused review enabled
-          PR_REVIEWER__REQUIRE_SECURITY_REVIEW: "true"
+          # Run security review only on full mode (opened/reopened)
+          # On update (synchronize), only code suggestions run for lightweight feedback
+          PR_REVIEWER__REQUIRE_SECURITY_REVIEW: ${{ inputs.mode == 'full' && 'true' || 'false' }}
 
           # Limit findings to focus only on high-impact issues
           PR_REVIEWER__NUM_MAX_FINDINGS: "4"
@@ -98,8 +99,10 @@ jobs:
 
           GITHUB_TOKEN: ${{ github.token }}
 
-          # Run auto-review only on PR creation/reopen, not on every push
-          github_action_config.auto_review: ${{ inputs.mode == 'full' && 'true' || 'false' }}
+          # Run auto-review on both full and incremental modes
+          # - full: complete security review + code suggestions
+          # - update: lightweight code suggestions on the new diff only
+          github_action_config.auto_review: "true"
 
           # Disable additional AI features to reduce cost and noise
           github_action_config.auto_describe: "false"
