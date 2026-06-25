@@ -27,7 +27,7 @@ on:
       pr_agent_enabled:
         description: "Enable PR Agent review"
         type: boolean
-        default: false
+        default: true
     secrets:
       JIRA_EMAIL:
         required: true
