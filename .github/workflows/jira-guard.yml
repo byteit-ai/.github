@@ -59,7 +59,6 @@ jobs:
       - name: Init log files
         run: touch errors.log warnings.log
 
-      # ── 1 · Extract Jira key ──────────────────
       - name: "1 · Extract Jira key"
         id: jira_key
         env:
@@ -68,25 +67,28 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           GIT_EVENT: ${{ github.event_name }}
           HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+          ACTOR: ${{ github.actor }}
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
+
+          if [ "$ACTOR" = "dependabot[bot]" ]; then
+            echo "key=" >> "$GITHUB_OUTPUT"
+            echo "## 🛡️ Jira Guard — Skipped (Dependabot)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           KEY=""
 
           if [ "$GIT_EVENT" = "push" ]; then
-            # On push (PR merged), extract Jira key from merge commit message
-            # Format: "Merge pull request #N from user/PROJ-123-fix"
             if [[ "$HEAD_COMMIT_MSG" =~ ([A-Z]+-[0-9]+) ]]; then
               KEY="${BASH_REMATCH[1]}"
             fi
           else
-            # dev → main is a release PR — no Jira key required
             if [[ "$HEAD_REF" == "dev" && "$BASE_REF" == "main" ]]; then
               echo "key=" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            # Branch formats (anchored to start, in priority order):
-            #   PROJ-123-free_text   → capture group 1
             if [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]]; then
               KEY="${BASH_REMATCH[1]}"
             elif [[ "$PR_TITLE" =~ ^([A-Z]+-[0-9]+)([^0-9]|$) ]]; then
