@@ -43,7 +43,7 @@ on:
 jobs:
   jira-guard:
     name: Jira Guard
-    if: github.event_name != 'merge_group' && github.actor != 'dependabot[bot]'
+    if: github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -67,13 +67,13 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           GIT_EVENT: ${{ github.event_name }}
           HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
-          ACTOR: ${{ github.actor }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           [[ "${RUNNER_DEBUG:-0}" == "1" ]] && set -x
 
-          if [ "$ACTOR" = "dependabot[bot]" ]; then
+          if [ "$GIT_EVENT" = "pull_request" ] && [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
             echo "key=" >> "$GITHUB_OUTPUT"
-            echo "## 🛡️ Jira Guard — Skipped (Dependabot)" >> "$GITHUB_STEP_SUMMARY"
+            echo "## 🛡️ Jira Guard — Skipped (Dependabot PR by $PR_AUTHOR)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -324,6 +324,7 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PUSH_REF: ${{ github.ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           BRANCH_DISPLAY="${HEAD_REF:-${PUSH_REF}}"
           BASE_DISPLAY="${BASE_REF:-}"
@@ -334,6 +335,7 @@ jobs:
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Jira key | \`${{ steps.jira_key.outputs.key || 'n/a' }}\` |"
+            echo "| PR author | \`${PR_AUTHOR:-n/a}\` |"
             echo "| Event | \`${{ github.event_name }}\` / \`${{ github.event.action }}\` |"
             echo "| Ref | \`$BRANCH_DISPLAY\` |"
             echo ""
@@ -468,7 +470,7 @@ jobs:
   pr-agent-full:
     name: PR Agent (full review)
     needs: [jira-guard]
-    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && inputs.pr_agent_enabled && github.actor != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && inputs.pr_agent_enabled && github.event.pull_request.user.login != 'dependabot[bot]'
     uses: ./.github/workflows/pr-agent.yml
     with:
       mode: "full"
@@ -480,7 +482,7 @@ jobs:
   # ── AdolfoBOT — post Review transition comment (PR opened/reopened) ──
   prepare-review-comment:
     name: AdolfoBOT — Prepare Review Comment
-    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.actor != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.user.login != 'dependabot[bot]'
     needs: [jira-guard]
     runs-on: ubuntu-latest
     outputs:
