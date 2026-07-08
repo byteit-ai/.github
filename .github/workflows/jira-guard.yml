@@ -43,7 +43,7 @@ on:
 jobs:
   jira-guard:
     name: Jira Guard
-    if: github.event_name != 'merge_group'
+    if: github.event_name != 'merge_group' && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -466,7 +466,7 @@ jobs:
   pr-agent-full:
     name: PR Agent (full review)
     needs: [jira-guard]
-    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && inputs.pr_agent_enabled
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && inputs.pr_agent_enabled && github.event.pull_request.user.login != 'dependabot[bot]'
     uses: ./.github/workflows/pr-agent.yml
     with:
       mode: "full"
@@ -478,7 +478,7 @@ jobs:
   # ── AdolfoBOT — post Review transition comment (PR opened/reopened) ──
   prepare-review-comment:
     name: AdolfoBOT — Prepare Review Comment
-    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.user.login != 'dependabot[bot]'
     needs: [jira-guard]
     runs-on: ubuntu-latest
     outputs:
