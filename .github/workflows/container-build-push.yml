@@ -64,10 +64,6 @@ on:
         description: "Cache write policy: auto | true | false"
         type: string
         default: "auto"
-      ssh:
-        description: "SSH agent socket or key for BuildKit SSH forwarding (e.g. 'default=${{ runner.temp }}/ssh-agent.sock')"
-        type: string
-        default: ""
 
     secrets:
       AWS_ROLE_ARN_DEV: { required: false }
@@ -200,7 +196,6 @@ jobs:
           build-args: ${{ steps.resolve.outputs.final_build_args }}
           platforms: ${{ inputs.platforms }}
           target: ${{ inputs.target }}
-          ssh: ${{ inputs.ssh }}
           cache-from: type=gha,scope=${{ inputs.cache_key_prefix }}
           cache-to: >-
             ${{ (inputs.write_cache == 'true' || (inputs.write_cache == 'auto'
