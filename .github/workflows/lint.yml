@@ -50,13 +50,12 @@ jobs:
         run: touch errors.log warnings.log
 
       # ── Ruff linter (Python) ──────────────────────
-      - name: Checkout shared ruff config
+      - name: Download shared ruff config
         if: inputs.linter == 'ruff' || inputs.linter == 'all'
-        uses: actions/checkout@v4
-        with:
-          repository: byteit-ai/github-workflows
-          path: .github-workflows
-          sparse-checkout: ruff.toml
+        run: |
+          mkdir -p .github-workflows
+          curl -sSL https://raw.githubusercontent.com/byteit-ai/.github/main/ruff.toml \
+            -o .github-workflows/ruff.toml
 
       - name: Install Ruff
         if: inputs.linter == 'ruff' || inputs.linter == 'all'
@@ -84,6 +83,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: "**/package-lock.json"
 
       - name: Install npm dependencies
         if: inputs.linter == 'eslint' || inputs.linter == 'all'
