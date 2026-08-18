@@ -122,24 +122,30 @@ jobs:
 
           STATUS=$(jq -r '.fields.status.name' jira_response.json)
 
-          if [ "$STATUS" == "In Progress" ]; then
-            TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-              -H "Accept: application/json" \
-              "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
-            TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="Review") | .id' | head -1)
-            if [ -z "$TRANS_ID" ]; then
-              echo "❌ Could not find a transition to 'Review' for $JIRA_KEY (available: $(echo \"$TRANS\" | jq -r '[.transitions[].name] | join(\", \")'))" >> errors.log
-            else
-              curl -sf -X POST \
-                -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
-                "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
-              echo "✅ Transitioned $JIRA_KEY: 'In Progress' → 'Review'"
-            fi
-          elif [ "$STATUS" != "Review" ]; then
-            echo "❌ Issue status is '$STATUS', expected 'In Progress' or 'Review'" >> errors.log
-          fi
+          case "$STATUS" in
+            "To Do"|"Done")
+              echo "❌ Issue $JIRA_KEY is in '$STATUS' — cannot transition to Review (do not touch To Do/Done issues)" >> errors.log
+              ;;
+            "Review")
+              :
+              ;;
+            *)
+              TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+                -H "Accept: application/json" \
+                "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
+              TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="Review") | .id' | head -1)
+              if [ -z "$TRANS_ID" ]; then
+                echo "❌ Could not find a transition to 'Review' for $JIRA_KEY (available: $(echo \"$TRANS\" | jq -r '[.transitions[].name] | join(\", \")'))" >> errors.log
+              else
+                curl -sf -X POST \
+                  -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
+                  "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
+                echo "✅ Transitioned $JIRA_KEY: '$STATUS' → Review"
+              fi
+              ;;
+          esac
 
       # ── 2 · Output transition for Review comment ──
       - name: "2 · Output Review transition context"
@@ -149,7 +155,10 @@ jobs:
           TRANSITIONED="false"
           if [ -f jira_response.json ]; then
             STATUS=$(jq -r '.fields.status.name' jira_response.json 2>/dev/null || echo "")
-            [ "$STATUS" == "In Progress" ] && TRANSITIONED="true"
+            case "$STATUS" in
+              "To Do"|"Done"|"Review") ;;
+              *) TRANSITIONED="true" ;;
+            esac
           fi
           echo "transitioned=$TRANSITIONED" >> "$GITHUB_OUTPUT"
 
