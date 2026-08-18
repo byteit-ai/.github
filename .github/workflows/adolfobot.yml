@@ -43,6 +43,23 @@
 #        comment_body: ${{ needs.prepare-step.outputs.comment }}
 #      secrets: inherit
 #
+#  Usage — bulk comment mode (post MANY comments in ONE job/run, no per-
+#  transition job nodes): pass a JSON array of {jira_key, comment_body} in
+#  `comments_json`. Prefer this over many separate adolfobot call sites so
+#  the workflow graph stays flat (every referenced job renders as a node,
+#  including skipped ones).
+#
+#    post-all-comments:
+#      name: AdolfoBOT — Post Comments
+#      needs: [prepare-comments]  # job that outputs comments_json
+#      if: always() && needs.prepare-comments.result == 'success'
+#      uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+#      with:
+#        workflow_name: "My Workflow"
+#        mode: "comment"
+#        comments_json: ${{ needs.prepare-comments.outputs.comments_json }}
+#      secrets: inherit
+#
 #  ⚠️  BYPASS POLICY
 #  Bypassing any automated workflow must be a deliberate exception,
 #  not a shortcut. Every bypass requires explicit manual approval

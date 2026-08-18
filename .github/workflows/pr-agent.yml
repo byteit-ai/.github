@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 6
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Shallow clone depth optimized for accurate diff computation without full history
           fetch-depth: 20
