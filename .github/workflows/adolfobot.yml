@@ -79,6 +79,10 @@ on:
         description: "Full comment text when mode=comment. Ignored in failure mode (failure message is auto-built)."
         type: string
         default: ""
+      comments_json:
+        description: "Bulk mode: JSON array of {\"jira_key\": ..., \"comment_body\": ...}. When set, every entry is posted as its own comment in a single run (jira_key_override/comment_body are ignored)."
+        type: string
+        default: ""
       jira_domain:
         description: "Jira cloud domain (e.g. mycompany.atlassian.net)"
         type: string
@@ -226,7 +230,7 @@ jobs:
 
       # ── 4 · Post Jira comment ─────────────────────────────────────────────
       - name: "[AdolfoBOT] Post Jira comment"
-        if: steps.jira_key.outputs.key != '' && steps.jira_creds.outputs.available == 'true' && steps.notify_policy.outputs.allowed == 'true'
+        if: (steps.jira_key.outputs.key != '' || inputs.comments_json != '') && steps.jira_creds.outputs.available == 'true' && steps.notify_policy.outputs.allowed == 'true'
         env:
           JIRA_KEY:      ${{ steps.jira_key.outputs.key }}
           JIRA_EMAIL:    ${{ secrets.JIRA_EMAIL }}
@@ -236,6 +240,7 @@ jobs:
           WORKFLOW_NAME: ${{ inputs.workflow_name }}
           EXTRA_CONTEXT: ${{ inputs.extra_context }}
           COMMENT_BODY:  ${{ inputs.comment_body }}
+          COMMENTS_JSON: ${{ inputs.comments_json }}
           RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ASSIGNEE_ID:   ${{ steps.assignee.outputs.account_id }}
           ASSIGNEE_NAME: ${{ steps.assignee.outputs.display_name }}
@@ -251,6 +256,7 @@ jobs:
           WORKFLOW     = os.environ.get("WORKFLOW_NAME", "")
           EXTRA        = os.environ.get("EXTRA_CONTEXT", "")
           BODY         = os.environ.get("COMMENT_BODY", "")
+          COMMENTS_JSON = os.environ.get("COMMENTS_JSON", "")
           RUN_URL      = os.environ.get("RUN_URL", "")
           ASSIGNEE_ID  = os.environ.get("ASSIGNEE_ID", "")
           ASSIGNEE_NAME = os.environ.get("ASSIGNEE_NAME", "")
@@ -268,51 +274,69 @@ jobs:
           def p(*nodes): return {"type": "paragraph", "content": list(nodes)}
           def rule(): return {"type": "rule"}
 
-          header = [t("[AdolfoBOT 🤖] says")]
-          if ASSIGNEE_ID:
-            header += [t(" to "), mention(ASSIGNEE_ID, ASSIGNEE_NAME)]
-          header.append(t(":"))
-          content = [p(*header)]
+          def build_content(target_key, body):
+            header = [t("[AdolfoBOT 🤖] says")]
+            if ASSIGNEE_ID:
+              header += [t(" to "), mention(ASSIGNEE_ID, ASSIGNEE_NAME)]
+            header.append(t(":"))
+            content = [p(*header)]
 
-          if MODE == "comment":
-            for line in BODY.split("\n"):
-              content.append(p(t(line or " ")))
-          else:
-            content.append(p(t("❌ "), bold(WORKFLOW), t(" failed on GitHub Actions.")))
-            content.append(p(link("→ View run", RUN_URL)))
-            if EXTRA.strip():
+            if MODE == "comment":
+              for line in body.split("\n"):
+                content.append(p(t(line or " ")))
+            else:
+              content.append(p(t("❌ "), bold(WORKFLOW), t(" failed on GitHub Actions.")))
+              content.append(p(link("→ View run", RUN_URL)))
+              if EXTRA.strip():
+                content.append(rule())
+                for line in EXTRA.split("\n"):
+                  if line.strip():
+                    content.append(p(t(line)))
               content.append(rule())
-              for line in EXTRA.split("\n"):
-                if line.strip():
-                  content.append(p(t(line)))
-            content.append(rule())
-            content.append(p(em(
-              "ℹ️ Exceptions require explicit AdolfoNonBOT approval. "
-              "✅ Green pipelines = safer deploys, stable releases, and fewer surprises. 🚀"
-            )))
+              content.append(p(em(
+                "ℹ️ Exceptions require explicit AdolfoNonBOT approval. "
+                "✅ Green pipelines = safer deploys, stable releases, and fewer surprises. 🚀"
+              )))
+            return content
 
-          adf = {"version": 1, "type": "doc", "content": content}
-          payload = json.dumps({"body": adf}).encode()
-          creds = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_TOKEN}".encode()).decode()
-          req = urllib.request.Request(
-            f"https://{JIRA_DOMAIN}/rest/api/3/issue/{JIRA_KEY}/comment",
-            data=payload,
-            headers={
-              "Authorization": f"Basic {creds}",
-              "Content-Type":  "application/json",
-              "Accept":        "application/json",
-            },
-            method="POST",
-          )
-          try:
-            with urllib.request.urlopen(req) as resp:
-              print(f"✅ [AdolfoBOT] Comment posted to {JIRA_KEY} (HTTP {resp.status})")
-          except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            print(f"⚠️  [AdolfoBOT] Failed to post comment to {JIRA_KEY} (HTTP {e.code}): {body}", file=sys.stderr)
-            with open("warnings.log", "a") as f:
-              f.write(f"⚠️  [AdolfoBOT] Failed to post comment to {JIRA_KEY} (HTTP {e.code})\n")
-            sys.exit(1)
+          def post_comment(target_key, body):
+            adf = {"version": 1, "type": "doc", "content": build_content(target_key, body)}
+            payload = json.dumps({"body": adf}).encode()
+            creds = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_TOKEN}".encode()).decode()
+            req = urllib.request.Request(
+              f"https://{JIRA_DOMAIN}/rest/api/3/issue/{target_key}/comment",
+              data=payload,
+              headers={
+                "Authorization": f"Basic {creds}",
+                "Content-Type":  "application/json",
+                "Accept":        "application/json",
+              },
+              method="POST",
+            )
+            try:
+              with urllib.request.urlopen(req) as resp:
+                print(f"✅ [AdolfoBOT] Comment posted to {target_key} (HTTP {resp.status})")
+            except urllib.error.HTTPError as e:
+              err_body = e.read().decode()
+              print(f"⚠️  [AdolfoBOT] Failed to post comment to {target_key} (HTTP {e.code}): {err_body}", file=sys.stderr)
+              with open("warnings.log", "a") as f:
+                f.write(f"⚠️  [AdolfoBOT] Failed to post comment to {target_key} (HTTP {e.code})\n")
+              sys.exit(1)
+
+          if COMMENTS_JSON.strip():
+            try:
+              targets = json.loads(COMMENTS_JSON)
+            except json.JSONDecodeError as e:
+              print(f"⚠️  [AdolfoBOT] Invalid comments_json: {e}", file=sys.stderr)
+              sys.exit(1)
+            for entry in targets:
+              key = entry.get("jira_key", "")
+              body = entry.get("comment_body", "")
+              if key:
+                post_comment(key, body)
+          else:
+            if JIRA_KEY:
+              post_comment(JIRA_KEY, BODY)
           PYEOF
 
       # ── 5 · Step summary ─────────────────────────────────────────────────

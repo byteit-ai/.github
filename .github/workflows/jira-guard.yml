@@ -488,125 +488,98 @@ jobs:
       LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
       LLM_MODEL: ${{ secrets.LLM_MODEL }}
 
-  # ── AdolfoBOT — post Review transition comment (PR opened/reopened) ──
-  prepare-review-comment:
-    name: AdolfoBOT — Prepare Review Comment
-    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.user.login != 'dependabot[bot]'
-    needs: [jira-guard]
+  # ── AdolfoBOT — build every transition comment for this run ──────────
+  # A single job computes 0..N comments (Review on PR open, In Progress on
+  # changes_requested, Done on push) and AdolfoBOT posts them all in one
+  # job — no per-transition prepare+post node pairs that render as skipped.
+  prepare-comments:
+    name: AdolfoBOT — Prepare Comments
+    if: always()
     runs-on: ubuntu-latest
     outputs:
-      jira_key:     ${{ steps.extract.outputs.key }}
-      comment_body: ${{ steps.extract.outputs.comment }}
+      comments_json: ${{ steps.build.outputs.comments_json }}
     steps:
-      - id: extract
+      - id: build
         env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: |
-          KEY=""
-          [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]] && KEY="${BASH_REMATCH[1]}"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-          [ -z "$KEY" ] && exit 0
-
-          COMMENT=$(printf "PR #%s opened (In Progress → Review).\nAuthor: %s\nPR: %s" "$PR_NUMBER" "$PR_AUTHOR" "$PR_TITLE")
-          {
-            echo "comment<<DELIMEOF"
-            echo -e "$COMMENT"
-            echo "DELIMEOF"
-          } >> "$GITHUB_OUTPUT"
-
-  post-review-comment:
-    name: AdolfoBOT — Post Review Comment
-    needs: [prepare-review-comment]
-    if: always() && needs.prepare-review-comment.result == 'success' && needs.prepare-review-comment.outputs.jira_key != ''
-    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
-    with:
-      workflow_name: "Jira Guard"
-      mode: "comment"
-      jira_key_override: ${{ needs.prepare-review-comment.outputs.jira_key }}
-      comment_body: ${{ needs.prepare-review-comment.outputs.comment_body }}
-    secrets: inherit
-
-  # ── AdolfoBOT — post In Progress transition comment (changes requested) ──
-  prepare-inprogress-comment:
-    name: AdolfoBOT — Prepare In Progress Comment
-    if: github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
-    runs-on: ubuntu-latest
-    outputs:
-      jira_key:     ${{ steps.extract.outputs.key }}
-      comment_body: ${{ steps.extract.outputs.comment }}
-    steps:
-      - id: extract
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          REVIEWER: ${{ github.event.review.user.login }}
-        run: |
-          KEY=""
-          [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]] && KEY="${BASH_REMATCH[1]}"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-          [ -z "$KEY" ] && exit 0
-
-          REVIEW_BODY=$(jq -r '.review.body // ""' "$GITHUB_EVENT_PATH")
-          COMMENT=$(printf "🔄 Changes requested by %s — issue moved back to In Progress." "$REVIEWER")
-          if [ -n "$REVIEW_BODY" ]; then
-            COMMENT="$COMMENT\n\nReview notes:\n$REVIEW_BODY"
-          fi
-          {
-            echo "comment<<DELIMEOF"
-            echo -e "$COMMENT"
-            echo "DELIMEOF"
-          } >> "$GITHUB_OUTPUT"
-
-  post-inprogress-comment:
-    name: AdolfoBOT — Post In Progress Comment
-    needs: [prepare-inprogress-comment]
-    if: always() && needs.prepare-inprogress-comment.result == 'success' && needs.prepare-inprogress-comment.outputs.jira_key != ''
-    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
-    with:
-      workflow_name: "Jira Guard"
-      mode: "comment"
-      jira_key_override: ${{ needs.prepare-inprogress-comment.outputs.jira_key }}
-      comment_body: ${{ needs.prepare-inprogress-comment.outputs.comment_body }}
-    secrets: inherit
-
-  # ── AdolfoBOT — post Done-on-push comment with assignee + reviewer mentions ──
-  prepare-done-comment:
-    name: AdolfoBOT — Prepare Done Comment
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    outputs:
-      jira_key: ${{ steps.extract.outputs.key }}
-      comment_body: ${{ steps.extract.outputs.comment }}
-    steps:
-      - id: extract
-        env:
+          EVENT_NAME:    ${{ github.event_name }}
+          EVENT_ACTION:  ${{ github.event.action }}
+          HEAD_REF:      ${{ github.event.pull_request.head.ref }}
+          PR_TITLE:      ${{ github.event.pull_request.title }}
+          PR_NUMBER:     ${{ github.event.pull_request.number }}
+          PR_AUTHOR:     ${{ github.event.pull_request.user.login }}
+          REVIEW_STATE:  ${{ github.event.review.state }}
+          REVIEWER:      ${{ github.event.review.user.login }}
           HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
-          PUSHER: ${{ github.event.pusher.name }}
-          REF: ${{ github.ref_name }}
+          PUSHER:        ${{ github.event.pusher.name }}
+          REF:           ${{ github.ref_name }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: |
-          KEY=""
-          [[ "$HEAD_COMMIT_MSG" =~ ([A-Z]+-[0-9]+) ]] && KEY="${BASH_REMATCH[1]}"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-          [ -z "$KEY" ] && exit 0
+          python3 - << 'PYEOF'
+          import json, os, re
 
-          COMMENT=$(printf "Code merged to %s — issue moved to Done.\nPushed by: %s" "$REF" "$PUSHER")
-          {
-            echo "comment<<DELIMEOF"
-            echo -e "$COMMENT"
-            echo "DELIMEOF"
-          } >> "$GITHUB_OUTPUT"
+          event = os.environ.get("EVENT_NAME", "")
+          comments = []
 
-  post-done-comment:
-    name: AdolfoBOT — Post Done Comment
-    needs: [prepare-done-comment]
-    if: always() && needs.prepare-done-comment.result == 'success' && needs.prepare-done-comment.outputs.jira_key != ''
+          def key_from(ref):
+              m = re.match(r"^([A-Z]+-[0-9]+)(-|$)", ref or "")
+              return m.group(1) if m else ""
+
+          if event == "pull_request":
+              if (os.environ.get("EVENT_ACTION") != "closed"
+                      and os.environ.get("PR_AUTHOR") != "dependabot[bot]"):
+                  key = key_from(os.environ.get("HEAD_REF", ""))
+                  if key:
+                      comments.append({
+                          "jira_key": key,
+                          "comment_body": (
+                              f"PR #{os.environ.get('PR_NUMBER')} opened (In Progress → Review).\n"
+                              f"Author: {os.environ.get('PR_AUTHOR')}\n"
+                              f"PR: {os.environ.get('PR_TITLE')}"
+                          ),
+                      })
+
+          elif event == "pull_request_review":
+              if os.environ.get("REVIEW_STATE") == "changes_requested":
+                  key = key_from(os.environ.get("HEAD_REF", ""))
+                  if key:
+                      comment = f"🔄 Changes requested by {os.environ.get('REVIEWER')} — issue moved back to In Progress."
+                      evt_path = os.environ.get("GITHUB_EVENT_PATH", "")
+                      if evt_path and os.path.exists(evt_path):
+                          with open(evt_path) as f:
+                              evt = json.load(f)
+                          review_body = (evt.get("review") or {}).get("body", "") or ""
+                          if review_body.strip():
+                              comment += f"\n\nReview notes:\n{review_body}"
+                      comments.append({"jira_key": key, "comment_body": comment})
+
+          elif event == "push":
+              m = re.search(r"([A-Z]+-[0-9]+)", os.environ.get("HEAD_COMMIT_MSG", "") or "")
+              if m:
+                  comments.append({
+                      "jira_key": m.group(1),
+                      "comment_body": (
+                          f"Code merged to {os.environ.get('REF')} — issue moved to Done.\n"
+                          f"Pushed by: {os.environ.get('PUSHER')}"
+                      ),
+                  })
+
+          print(json.dumps(comments))
+          with open("comments.json", "w") as f:
+              json.dump(comments, f)
+          print(f"comments_json={json.dumps(comments)}")
+          PYEOF
+          echo "comments_json<<EOF" >> "$GITHUB_OUTPUT"
+          cat comments.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+  post-comments:
+    name: AdolfoBOT — Post Comments
+    needs: [prepare-comments]
+    if: always() && needs.prepare-comments.result == 'success'
     uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
     with:
       workflow_name: "Jira Guard"
       mode: "comment"
-      jira_key_override: ${{ needs.prepare-done-comment.outputs.jira_key }}
-      comment_body: ${{ needs.prepare-done-comment.outputs.comment_body }}
+      comments_json: ${{ needs.prepare-comments.outputs.comments_json }}
     secrets: inherit
 
