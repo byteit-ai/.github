@@ -570,6 +570,7 @@ jobs:
           PYEOF
           echo "comments_json<<EOF" >> "$GITHUB_OUTPUT"
           cat comments.json >> "$GITHUB_OUTPUT"
+          echo >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
   post-comments:
