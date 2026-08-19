@@ -15,6 +15,10 @@ on:
       LLM_MODEL:
         required: true
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   pr-agent:
     name: PR Agent (${{ inputs.mode }})
