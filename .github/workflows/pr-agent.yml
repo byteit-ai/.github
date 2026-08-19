@@ -55,7 +55,7 @@ jobs:
           # Prevent long-running LLM calls from blocking CI
           CONFIG__AI_TIMEOUT: "60"
 
-          # Custom model (DeepInfra/DeepSeek) — not in PR Agent's built-in token map
+          # Custom model — not in PR Agent's built-in token map
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: "32000"
           CONFIG__MODEL_TOKEN_COUNT_ESTIMATE_FACTOR: "0.5"
 
@@ -77,7 +77,7 @@ jobs:
           PR_REVIEWER__REQUIRE_SECURITY_REVIEW: ${{ inputs.mode == 'full' && 'true' || 'false' }}
 
           # Limit findings to focus only on high-impact issues
-          PR_REVIEWER__NUM_MAX_FINDINGS: "4"
+          PR_REVIEWER__NUM_MAX_FINDINGS: "6"
 
           # Disable verbose UI elements in comments
           PR_REVIEWER__ENABLE_INTRO_TEXT: "false"
@@ -95,7 +95,7 @@ jobs:
           PR_CODE_SUGGESTIONS__FOCUS_ONLY_ON_PROBLEMS: "true"
 
           # Limit suggestions per code chunk to reduce noise
-          PR_CODE_SUGGESTIONS__NUM_CODE_SUGGESTIONS_PER_CHUNK: "2"
+          PR_CODE_SUGGESTIONS__NUM_CODE_SUGGESTIONS_PER_CHUNK: "1"
 
           # Prevent multiple expensive LLM passes over the same diff
           PR_CODE_SUGGESTIONS__MAX_NUMBER_OF_CALLS: "1"
@@ -114,6 +114,11 @@ jobs:
           # - update: lightweight code suggestions on the new diff only
           github_action_config.auto_review: "true"
 
-          # Disable additional AI features to reduce cost and noise
+          # Publish inline code-improvement suggestions (proposed fix snippets)
+          # as comments ONLY — never commits code or pushes changes.
+          github_action_config.auto_improve: "true"
+
+          # Belt-and-suspenders: never let suggestions be applied as commits
+          PR_CODE_SUGGESTIONS__ENABLE_COMMIT_SUGGESTIONS: "false"
+
           github_action_config.auto_describe: "false"
-          github_action_config.auto_improve: "false"
