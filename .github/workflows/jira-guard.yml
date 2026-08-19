@@ -563,15 +563,14 @@ jobs:
                       ),
                   })
 
-          print(json.dumps(comments))
-          with open("comments.json", "w") as f:
-              json.dump(comments, f)
-          print(f"comments_json={json.dumps(comments)}")
+          # Write a single-line value to $GITHUB_OUTPUT — no <<heredoc, so the
+          # "Matching delimiter not found" failure can never occur. json.dumps
+          # escapes newlines (\\n) so the value stays on one line.
+          gh = os.environ.get("GITHUB_OUTPUT", "")
+          if gh:
+              with open(gh, "a") as f:
+                  f.write(f"comments_json={json.dumps(comments)}\n")
           PYEOF
-          echo "comments_json<<EOF" >> "$GITHUB_OUTPUT"
-          cat comments.json >> "$GITHUB_OUTPUT"
-          echo >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
 
   post-comments:
     name: AdolfoBOT — Post Comments
