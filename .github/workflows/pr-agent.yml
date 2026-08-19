@@ -91,8 +91,9 @@ jobs:
           PR_REVIEWER__PUBLISH_OUTPUT_NO_SUGGESTIONS: "false"
 
           # Guide the model toward concise, high-signal senior review
-          PR_REVIEWER__EXTRA_INSTRUCTIONS: "Report only security vulnerabilities and correctness or logic bugs that are likely to cause real failures. Ignore style, formatting, naming, duplication, or lint-level issues — the team's linter and the dev's own AI already handle those. For each finding, state the concrete problem in one clear sentence, then give a minimal, focused fix as a short code snippet (a few lines) that solves the exact issue. Do not rewrite whole functions or add commentary. Be direct and precise."
-
+          # Guía al modelo para actuar como Arquitecto Principal (en una sola línea válida para YAML)
+          PR_REVIEWER__EXTRA_INSTRUCTIONS: "You are a Principal Software Architect and Security Lead. Focus exclusively on high-level architecture, design patterns, scalability, maintainability, severe security flaws, and architectural anti-patterns (e.g., tight coupling, circular dependencies, breaking data flows, bad abstraction layers). STRICT RULES: 1. IGNORE all syntax, formatting, naming, and lint issues. 2. For every finding, provide: - **Impact:** One clear sentence explaining why this design choice harms the system. - **Solution:** A concise architectural direction or minimal structural code block."
+          
           # Disable verbose UI elements in comments
           PR_REVIEWER__ENABLE_INTRO_TEXT: "false"
           PR_REVIEWER__ENABLE_HELP_TEXT: "false"
