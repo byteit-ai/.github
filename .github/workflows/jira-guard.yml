@@ -475,11 +475,11 @@ jobs:
       workflow_name: "Jira Guard"
     secrets: inherit
 
-  # ── PR Agent — automated review (opened/synchronize/reopened) ─────────────
+  # ── PR Agent — automated review (opened only) ─────────────────────────────
   pr-agent-full:
     name: PR Agent (full review)
     needs: [jira-guard]
-    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && inputs.pr_agent_enabled && github.event.pull_request.user.login != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && github.event.action == 'opened' && inputs.pr_agent_enabled && github.event.pull_request.user.login != 'dependabot[bot]'
     uses: ./.github/workflows/pr-agent.yml
     with:
       mode: "full"
@@ -487,6 +487,95 @@ jobs:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
       LLM_MODEL: ${{ secrets.LLM_MODEL }}
+
+  # ── PR Agent found issues → move issue back to In Progress ───────────────
+  # The agent posts a comment only when it finds problems (it stays silent on
+  # clean PRs). If it did post, treat it like "changes requested": transition
+  # the linked Jira issue to In Progress (.to.name). The comment is posted by a
+  # separate job (pr-agent-comment) that calls adolfobot.yml — a reusable
+  # workflow can only be invoked at job level, never inside a step.
+  pr-agent-changes:
+    name: PR Agent — In Progress
+    needs: [pr-agent-full]
+    if: github.event_name == 'pull_request' && needs.pr-agent-full.outputs.posted_comments == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      jira_key: ${{ steps.jira_key.outputs.key }}
+      comment_body: ${{ steps.jira_key.outputs.comment_body }}
+    steps:
+      - name: Resolve Jira key
+        id: jira_key
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN: ${{ inputs.jira_domain }}
+        run: |
+          KEY=""
+          if [[ "$HEAD_REF" =~ ^([A-Z]+-[0-9]+)(-|$) ]]; then
+            KEY="${BASH_REMATCH[1]}"
+          fi
+
+          # Only touch Jira if the issue actually exists. Otherwise leave the
+          # key empty so the transition step and comment job are skipped (never
+          # a failure), and print a warning.
+          if [ -n "$KEY" ]; then
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+              -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+              -H "Accept: application/json" \
+              "https://$JIRA_DOMAIN/rest/api/3/issue/$KEY" 2>/dev/null) || HTTP=000
+            if [ "$HTTP" != "200" ]; then
+              echo "⚠️  Jira issue $KEY not found (HTTP $HTTP) — PR Agent review done, Jira left untouched"
+              KEY=""
+            fi
+          fi
+
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "comment_body=🔴 PR Agent review found issues on PR #${PR_NUMBER} — issue moved back to In Progress.\nPR: ${PR_TITLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Transition to In Progress
+        if: steps.jira_key.outputs.key != ''
+        env:
+          JIRA_KEY: ${{ steps.jira_key.outputs.key }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN: ${{ inputs.jira_domain }}
+        run: |
+          ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY?fields=status") || exit 0
+          FROM_STATUS=$(echo "$ISSUE" | jq -r '.fields.status.name')
+
+          TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions") || exit 0
+          TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="In Progress") | .id' | head -1)
+
+          if [ -n "$TRANS_ID" ]; then
+            curl -sf -X POST \
+              -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
+              "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
+            echo "✅ Transitioned $JIRA_KEY: '$FROM_STATUS' → 'In Progress' (PR Agent found issues)"
+          else
+            echo "⚠️  No 'In Progress' transition available for $JIRA_KEY"
+          fi
+
+  pr-agent-comment:
+    name: AdolfoBOT — PR Agent Findings
+    needs: [pr-agent-changes]
+    if: needs.pr-agent-changes.outputs.jira_key != ''
+    uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
+    with:
+      workflow_name: "PR Agent"
+      mode: "comment"
+      jira_key_override: ${{ needs.pr-agent-changes.outputs.jira_key }}
+      comment_body: ${{ needs.pr-agent-changes.outputs.comment_body }}
+    secrets: inherit
 
   # ── AdolfoBOT — build every transition comment for this run ──────────
   # A single job computes 0..N comments (Review on PR open, In Progress on

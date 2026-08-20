@@ -7,6 +7,10 @@ on:
         description: '"full" (opened/reopened) or "update" (synchronize)'
         type: string
         required: true
+    outputs:
+      posted_comments:
+        description: '"true" if the PR Agent published a review comment (found issues); "false" if it stayed silent'
+        value: ${{ jobs.pr-agent.outputs.posted_comments }}
     secrets:
       LLM_API_KEY:
         required: true
@@ -24,12 +28,29 @@ jobs:
     name: PR Agent (${{ inputs.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 6
+    outputs:
+      posted_comments: ${{ steps.detect.outputs.posted_comments }}
 
     steps:
       - uses: actions/checkout@v5
         with:
           # Shallow clone depth optimized for accurate diff computation without full history
           fetch-depth: 20
+
+      # Snapshot PR comment/review count before the agent runs. The agent is
+      # configured to stay silent when the PR is clean, so a comment-count
+      # increase below means it found issues (behaves like "changes requested").
+      - name: Capture comment baseline
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPO="${{ github.repository }}"
+          NUM="${{ github.event.pull_request.number }}"
+          REVIEWS=$(gh api "repos/$REPO/pulls/$NUM/reviews" --paginate 2>/dev/null | jq 'length' || echo 0)
+          COMMENTS=$(gh api "repos/$REPO/pulls/$NUM/comments" --paginate 2>/dev/null | jq 'length' || echo 0)
+          ISSUE_COMMENTS=$(gh api "repos/$REPO/issues/$NUM/comments" --paginate 2>/dev/null | jq 'length' || echo 0)
+          echo "$((REVIEWS + COMMENTS + ISSUE_COMMENTS))" > comment_baseline.txt
 
       - name: Run PR Agent
         uses: the-pr-agent/pr-agent@main
@@ -116,3 +137,25 @@ jobs:
           github_action_config.auto_improve: "false"
 
           github_action_config.auto_describe: "false"
+
+      # Compare the comment/review count after the agent ran against the
+      # baseline. If it grew, the agent published a review (found issues).
+      - name: Detect agent comments
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPO="${{ github.repository }}"
+          NUM="${{ github.event.pull_request.number }}"
+          BASELINE=$(cat comment_baseline.txt 2>/dev/null || echo 0)
+          REVIEWS=$(gh api "repos/$REPO/pulls/$NUM/reviews" --paginate 2>/dev/null | jq 'length' || echo 0)
+          COMMENTS=$(gh api "repos/$REPO/pulls/$NUM/comments" --paginate 2>/dev/null | jq 'length' || echo 0)
+          ISSUE_COMMENTS=$(gh api "repos/$REPO/issues/$NUM/comments" --paginate 2>/dev/null | jq 'length' || echo 0)
+          AFTER=$((REVIEWS + COMMENTS + ISSUE_COMMENTS))
+          if [ "$AFTER" -gt "$BASELINE" ]; then
+            echo "posted_comments=true" >> "$GITHUB_OUTPUT"
+            echo "PR Agent published findings on PR #$NUM (comments: $BASELINE → $AFTER)."
+          else
+            echo "posted_comments=false" >> "$GITHUB_OUTPUT"
+            echo "PR Agent found no issues on PR #$NUM."
+          fi
