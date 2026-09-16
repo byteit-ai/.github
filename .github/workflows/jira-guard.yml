@@ -7,7 +7,7 @@
 #  Caller triggers:
 #    ci.yml         — pull_request: [opened, synchronize, reopened]
 #    cd.yml         — push: [main]
-#    review-guard.yml — pull_request_review: [submitted] (via step 2c)
+#    review-guard.yml — pull_request_review: [submitted] (via steps 2c/2d)
 #  All transitions use .to.name (never hardcoded transition names).
 #  Debug: set repo secret ACTIONS_STEP_DEBUG=true for verbose runner logs.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -238,6 +238,63 @@ jobs:
         if: steps.jira_key.outputs.key != '' && github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
         run: |
           echo "transitioned=true" >> "$GITHUB_OUTPUT"
+
+      # ── 2d · Transition to Ready To Deploy on approval ──
+      # Runs on an approved review once the PR is mergeable (no conflicts, all
+      # required checks/reviews satisfied). Waits for GitHub to compute
+      # mergeability lazily before transitioning.
+      - name: "2d · Transition to Ready To Deploy (approved)"
+        if: steps.jira_key.outputs.key != '' && github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.pull_request.merged == false
+        env:
+          JIRA_KEY: ${{ steps.jira_key.outputs.key }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN: ${{ inputs.jira_domain }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Wait for GitHub to compute mergeability (may be "unknown" initially).
+          STATE="unknown"
+          for _ in $(seq 1 30); do
+            STATE=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER" \
+              | jq -r '.mergeable_state')
+            echo "mergeable_state=$STATE"
+            [ "$STATE" != "unknown" ] && break
+            sleep 5
+          done
+
+          # Only transition when fully clean and mergeable — never force it.
+          if [ "$STATE" != "clean" ]; then
+            echo "ℹ️  PR mergeable_state is '$STATE' — skipping Ready To Deploy"
+            exit 0
+          fi
+
+          ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY?fields=status")
+          CURRENT=$(echo "$ISSUE" | jq -r '.fields.status.name')
+          if [ "$CURRENT" = "Ready To Deploy" ]; then
+            echo "ℹ️  $JIRA_KEY already in Ready To Deploy — skipping"
+            exit 0
+          fi
+
+          TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" \
+            "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
+          TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="Ready To Deploy") | .id' | head -1)
+          if [ -z "$TRANS_ID" ]; then
+            echo "⚠️  No 'Ready To Deploy' transition available for $JIRA_KEY (current: $CURRENT)" >> warnings.log
+          else
+            curl -sf -X POST \
+              -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
+              "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
+            echo "✅ Transitioned $JIRA_KEY: '$CURRENT' → 'Ready To Deploy'"
+          fi
 
       # ── 3 · Blocking dependencies must be DONE ─
       - name: "3 · Jira dependencies"
