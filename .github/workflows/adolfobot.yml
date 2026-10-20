@@ -291,33 +291,43 @@ jobs:
           def p(*nodes): return {"type": "paragraph", "content": list(nodes)}
           def rule(): return {"type": "rule"}
 
-          def build_content(target_key, body):
-            header = [t("[AdolfoBOT 🤖] says")]
-            if ASSIGNEE_ID:
-              header += [t(" to "), mention(ASSIGNEE_ID, ASSIGNEE_NAME)]
-            header.append(t(":"))
+          def hard_break():
+            return {"type": "hardBreak"}
+
+          def build_content(target_key, body, mention_id="", mention_name=""):
+            # Compact: one header line + one body paragraph (hardBreaks, not N paragraphs).
+            mid = mention_id or ASSIGNEE_ID
+            mname = mention_name or ASSIGNEE_NAME
+            header = [t("[AdolfoBOT]")]
+            if mid:
+              header += [t(" "), mention(mid, mname)]
             content = [p(*header)]
 
             if MODE == "comment":
-              for line in body.split("\n"):
-                content.append(p(t(line or " ")))
+              nodes = []
+              lines = body.split("\n")
+              for i, line in enumerate(lines):
+                if i:
+                  nodes.append(hard_break())
+                nodes.append(t(line if line else " "))
+              content.append(p(*nodes) if nodes else p(t(" ")))
             else:
-              content.append(p(t("❌ "), bold(WORKFLOW), t(" failed on GitHub Actions.")))
-              content.append(p(link("→ View run", RUN_URL)))
+              content.append(p(t("❌ "), bold(WORKFLOW), t(" failed.")))
+              content.append(p(link("View run", RUN_URL)))
               if EXTRA.strip():
-                content.append(rule())
-                for line in EXTRA.split("\n"):
-                  if line.strip():
-                    content.append(p(t(line)))
-              content.append(rule())
-              content.append(p(em(
-                "ℹ️ Exceptions require explicit AdolfoNonBOT approval. "
-                "✅ Green pipelines = safer deploys, stable releases, and fewer surprises. 🚀"
-              )))
+                extra_nodes = []
+                for i, line in enumerate(EXTRA.split("\n")):
+                  if not line.strip():
+                    continue
+                  if extra_nodes:
+                    extra_nodes.append(hard_break())
+                  extra_nodes.append(t(line))
+                if extra_nodes:
+                  content.append(p(*extra_nodes))
             return content
 
-          def post_comment(target_key, body):
-            adf = {"version": 1, "type": "doc", "content": build_content(target_key, body)}
+          def post_comment(target_key, body, mention_id="", mention_name=""):
+            adf = {"version": 1, "type": "doc", "content": build_content(target_key, body, mention_id, mention_name)}
             payload = json.dumps({"body": adf}).encode()
             creds = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_TOKEN}".encode()).decode()
             req = urllib.request.Request(
@@ -350,7 +360,12 @@ jobs:
               key = entry.get("jira_key", "")
               body = entry.get("comment_body", "")
               if key:
-                post_comment(key, body)
+                post_comment(
+                  key,
+                  body,
+                  entry.get("mention_account_id", ""),
+                  entry.get("mention_display_name", ""),
+                )
           else:
             if JIRA_KEY:
               post_comment(JIRA_KEY, BODY)
