@@ -7,7 +7,7 @@
 #  Caller triggers:
 #    ci.yml         — pull_request: [opened, synchronize, reopened]
 #    cd.yml         — push: [main]
-#    review-guard.yml — pull_request_review: [submitted] (via steps 2c/2d)
+#    review-guard.yml — pull_request_review: [submitted] (2c In Progress / 2d Ready To Deploy)
 #  All transitions use .to.name (never hardcoded transition names).
 #  Debug: set repo secret ACTIONS_STEP_DEBUG=true for verbose runner logs.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -178,13 +178,24 @@ jobs:
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY?fields=status")
           FROM_STATUS=$(echo "$ISSUE" | jq -r '.fields.status.name')
 
+          case "$FROM_STATUS" in
+            "To Do")
+              echo "❌ Issue $JIRA_KEY is in 'To Do' — cannot move to Done" >> errors.log
+              exit 0
+              ;;
+            "Done")
+              echo "ℹ️  $JIRA_KEY already in Done — skipping"
+              exit 0
+              ;;
+          esac
+
           TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" \
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
           TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="Done") | .id' | head -1)
 
           if [ -z "$TRANS_ID" ]; then
-            echo "⚠️  Could not find a transition to 'Done' for $JIRA_KEY (available: $(echo "$TRANS" | jq -r '[.transitions[].name] | join(", ")'))" >> warnings.log
+            echo "❌ Could not find a transition to 'Done' for $JIRA_KEY (available: $(echo "$TRANS" | jq -r '[.transitions[].name] | join(", ")'))" >> errors.log
           else
             curl -sf -X POST \
               -u "$JIRA_EMAIL:$JIRA_TOKEN" \
@@ -216,12 +227,23 @@ jobs:
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY?fields=status")
           FROM_STATUS=$(echo "$ISSUE" | jq -r '.fields.status.name')
 
+          case "$FROM_STATUS" in
+            "To Do"|"Done")
+              echo "❌ Issue $JIRA_KEY is in '$FROM_STATUS' — cannot move to In Progress (do not touch To Do/Done issues)" >> errors.log
+              exit 0
+              ;;
+            "In Progress")
+              echo "ℹ️  $JIRA_KEY already in In Progress — skipping"
+              exit 0
+              ;;
+          esac
+
           TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" \
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
           TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="In Progress") | .id' | head -1)
           if [ -z "$TRANS_ID" ]; then
-            echo "⚠️  Could not find a transition to 'In Progress' for $JIRA_KEY (available: $(echo "$TRANS" | jq -r '[.transitions[].name] | join(\", \")'))" >> warnings.log
+            echo "❌ Could not find a transition to 'In Progress' for $JIRA_KEY (available: $(echo "$TRANS" | jq -r '[.transitions[].name] | join(", ")'))" >> errors.log
           else
             curl -sf -X POST \
               -u "$JIRA_EMAIL:$JIRA_TOKEN" \
@@ -240,9 +262,8 @@ jobs:
           echo "transitioned=true" >> "$GITHUB_OUTPUT"
 
       # ── 2d · Transition to Ready To Deploy on approval ──
-      # Runs on an approved review once the PR is mergeable (no conflicts, all
-      # required checks/reviews satisfied). Waits for GitHub to compute
-      # mergeability lazily before transitioning.
+      # On approved review: move to Ready To Deploy from any status except
+      # To Do/Done (those are hard errors). Idempotent if already there.
       - name: "2d · Transition to Ready To Deploy (approved)"
         if: steps.jira_key.outputs.key != '' && github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.pull_request.merged == false
         env:
@@ -250,50 +271,37 @@ jobs:
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_DOMAIN: ${{ inputs.jira_domain }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GITHUB_TOKEN: ${{ github.token }}
+          REVIEWER: ${{ github.event.review.user.login }}
         run: |
-          # Wait for GitHub to compute mergeability (may be "unknown" initially).
-          STATE="unknown"
-          for _ in $(seq 1 30); do
-            STATE=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER" \
-              | jq -r '.mergeable_state')
-            echo "mergeable_state=$STATE"
-            [ "$STATE" != "unknown" ] && break
-            sleep 5
-          done
-
-          # Only transition when fully clean and mergeable — never force it.
-          if [ "$STATE" != "clean" ]; then
-            echo "ℹ️  PR mergeable_state is '$STATE' — skipping Ready To Deploy"
-            exit 0
-          fi
-
           ISSUE=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" \
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY?fields=status")
           CURRENT=$(echo "$ISSUE" | jq -r '.fields.status.name')
-          if [ "$CURRENT" = "Ready To Deploy" ]; then
-            echo "ℹ️  $JIRA_KEY already in Ready To Deploy — skipping"
-            exit 0
-          fi
+
+          case "$CURRENT" in
+            "To Do"|"Done")
+              echo "❌ Issue $JIRA_KEY is in '$CURRENT' — cannot move to Ready To Deploy (do not touch To Do/Done issues)" >> errors.log
+              exit 0
+              ;;
+            "Ready To Deploy")
+              echo "ℹ️  $JIRA_KEY already in Ready To Deploy — skipping"
+              exit 0
+              ;;
+          esac
 
           TRANS=$(curl -sf -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" \
             "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions")
           TRANS_ID=$(echo "$TRANS" | jq -r '.transitions[] | select(.to.name=="Ready To Deploy") | .id' | head -1)
           if [ -z "$TRANS_ID" ]; then
-            echo "⚠️  No 'Ready To Deploy' transition available for $JIRA_KEY (current: $CURRENT)" >> warnings.log
+            echo "❌ No 'Ready To Deploy' transition available for $JIRA_KEY (current: $CURRENT; available: $(echo "$TRANS" | jq -r '[.transitions[].name] | join(", ")'))" >> errors.log
           else
             curl -sf -X POST \
               -u "$JIRA_EMAIL:$JIRA_TOKEN" \
               -H "Content-Type: application/json" \
               -d "{\"transition\":{\"id\":\"$TRANS_ID\"}}" \
               "https://$JIRA_DOMAIN/rest/api/3/issue/$JIRA_KEY/transitions"
-            echo "✅ Transitioned $JIRA_KEY: '$CURRENT' → 'Ready To Deploy'"
+            echo "✅ Transitioned $JIRA_KEY: '$CURRENT' → 'Ready To Deploy' (approved by $REVIEWER)"
           fi
 
       # ── 3 · Blocking dependencies must be DONE ─
@@ -659,69 +667,123 @@ jobs:
           PUSHER:        ${{ github.event.pusher.name }}
           REF:           ${{ github.ref_name }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
+          JIRA_EMAIL:    ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN:    ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_DOMAIN:   ${{ inputs.jira_domain }}
         run: |
           python3 - << 'PYEOF'
-          import json, os, re
+          import json, os, re, urllib.request, urllib.parse, base64
 
           event = os.environ.get("EVENT_NAME", "")
+          action = os.environ.get("EVENT_ACTION", "")
           comments = []
 
           def key_from(ref):
               m = re.match(r"^([A-Z]+-[0-9]+)(-|$)", ref or "")
               return m.group(1) if m else ""
 
+          def resolve_mention(github_login):
+              """Map GitHub login → Jira accountId/displayName via user search."""
+              if not github_login:
+                  return "", ""
+              email = os.environ.get("JIRA_EMAIL", "")
+              token = os.environ.get("JIRA_TOKEN", "")
+              domain = os.environ.get("JIRA_DOMAIN", "")
+              if not (email and token and domain):
+                  return "", ""
+              q = urllib.parse.urlencode({"query": github_login})
+              url = f"https://{domain}/rest/api/3/user/search?{q}"
+              creds = base64.b64encode(f"{email}:{token}".encode()).decode()
+              req = urllib.request.Request(
+                  url,
+                  headers={"Authorization": f"Basic {creds}", "Accept": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      users = json.loads(resp.read().decode())
+              except Exception as e:
+                  print(f"⚠️  mention resolve failed for {github_login}: {e}")
+                  return "", ""
+              if not users:
+                  return "", ""
+              # Prefer exact email-local-part / displayName contains login
+              login_l = github_login.lower()
+              pick = users[0]
+              for u in users:
+                  name = (u.get("displayName") or "").lower()
+                  em = (u.get("emailAddress") or "").lower()
+                  if login_l in name or login_l in em.split("@")[0]:
+                      pick = u
+                      break
+              return pick.get("accountId") or "", pick.get("displayName") or ""
+
+          def add(key, body, mention_login=""):
+              if not key:
+                  return
+              mid, mname = resolve_mention(mention_login) if mention_login else ("", "")
+              entry = {"jira_key": key, "comment_body": body}
+              if mid:
+                  entry["mention_account_id"] = mid
+                  entry["mention_display_name"] = mname
+              comments.append(entry)
+
           if event == "pull_request":
-              if (os.environ.get("EVENT_ACTION") != "closed"
-                      and os.environ.get("PR_AUTHOR") != "dependabot[bot]"):
+              # Only comment on real open/reopen — not synchronize / review_requested.
+              if action in ("opened", "reopened") and os.environ.get("PR_AUTHOR") != "dependabot[bot]":
                   key = key_from(os.environ.get("HEAD_REF", ""))
-                  if key:
-                      comments.append({
-                          "jira_key": key,
-                          "comment_body": (
-                              f"PR #{os.environ.get('PR_NUMBER')} opened (In Progress → Review).\n"
-                              f"Author: {os.environ.get('PR_AUTHOR')}\n"
-                              f"PR: {os.environ.get('PR_TITLE')}"
-                          ),
-                      })
+                  add(
+                      key,
+                      f"PR #{os.environ.get('PR_NUMBER')} → Review.",
+                      os.environ.get("PR_AUTHOR", ""),
+                  )
 
           elif event == "pull_request_review":
-              if os.environ.get("REVIEW_STATE") == "changes_requested":
-                  key = key_from(os.environ.get("HEAD_REF", ""))
-                  if key:
-                      comment = f"🔄 Changes requested by {os.environ.get('REVIEWER')} — issue moved back to In Progress."
-                      evt_path = os.environ.get("GITHUB_EVENT_PATH", "")
-                      if evt_path and os.path.exists(evt_path):
-                          with open(evt_path) as f:
-                              evt = json.load(f)
-                          review_body = (evt.get("review") or {}).get("body", "") or ""
-                          if review_body.strip():
-                              comment += f"\n\nReview notes:\n{review_body}"
-                      comments.append({"jira_key": key, "comment_body": comment})
+              key = key_from(os.environ.get("HEAD_REF", ""))
+              state = os.environ.get("REVIEW_STATE", "")
+              reviewer = os.environ.get("REVIEWER", "")
+              author = os.environ.get("PR_AUTHOR", "")
+              if state == "changes_requested":
+                  body = f"Changes requested by {reviewer} → In Progress."
+                  evt_path = os.environ.get("GITHUB_EVENT_PATH", "")
+                  if evt_path and os.path.exists(evt_path):
+                      with open(evt_path) as f:
+                          evt = json.load(f)
+                      note = ((evt.get("review") or {}).get("body") or "").strip()
+                      if note:
+                          if len(note) > 280:
+                              note = note[:277] + "..."
+                          body += f" {note}"
+                  add(key, body, author)  # notify the developer (PR author)
+              elif state == "approved":
+                  add(
+                      key,
+                      f"Approved by {reviewer} → Ready To Deploy.",
+                      author,
+                  )
 
           elif event == "push":
               m = re.search(r"([A-Z]+-[0-9]+)", os.environ.get("HEAD_COMMIT_MSG", "") or "")
               if m:
-                  comments.append({
-                      "jira_key": m.group(1),
-                      "comment_body": (
-                          f"Code merged to {os.environ.get('REF')} — issue moved to Done.\n"
-                          f"Pushed by: {os.environ.get('PUSHER')}"
-                      ),
-                  })
+                  add(
+                      m.group(1),
+                      f"Merged to {os.environ.get('REF')} → Done.",
+                      "",
+                  )
 
-          # Write a single-line value to $GITHUB_OUTPUT — no <<heredoc, so the
-          # "Matching delimiter not found" failure can never occur. json.dumps
-          # escapes newlines (\\n) so the value stays on one line.
           gh = os.environ.get("GITHUB_OUTPUT", "")
           if gh:
               with open(gh, "a") as f:
-                  f.write(f"comments_json={json.dumps(comments)}\n")
+                  f.write(f"comments_json={json.dumps(comments, separators=(',', ':'))}\n")
           PYEOF
 
   post-comments:
     name: AdolfoBOT — Post Comments
     needs: [prepare-comments]
-    if: always() && needs.prepare-comments.result == 'success'
+    if: >-
+      always() &&
+      needs.prepare-comments.result == 'success' &&
+      needs.prepare-comments.outputs.comments_json != '' &&
+      needs.prepare-comments.outputs.comments_json != '[]'
     uses: byteit-ai/.github/.github/workflows/adolfobot.yml@main
     with:
       workflow_name: "Jira Guard"
