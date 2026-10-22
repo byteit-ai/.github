@@ -48,6 +48,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       jira_key: ${{ steps.jira_key.outputs.key }}
+      moved_to_review: ${{ steps.review_transition.outputs.transitioned }}
 
     steps:
       # ── 0 · Setup ─────────────────────────────
@@ -574,7 +575,6 @@ jobs:
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_DOMAIN: ${{ inputs.jira_domain }}
@@ -599,7 +599,7 @@ jobs:
           fi
 
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
-          echo "comment_body=🔴 PR Agent review found issues on PR #${PR_NUMBER} — issue moved back to In Progress.\nPR: ${PR_TITLE}" >> "$GITHUB_OUTPUT"
+          echo "comment_body=🔴 PR Agent found issues on PR #${PR_NUMBER} → In Progress." >> "$GITHUB_OUTPUT"
 
       - name: Transition to In Progress
         if: steps.jira_key.outputs.key != ''
@@ -648,6 +648,7 @@ jobs:
   # job — no per-transition prepare+post node pairs that render as skipped.
   prepare-comments:
     name: AdolfoBOT — Prepare Comments
+    needs: [jira-guard]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -658,9 +659,13 @@ jobs:
           EVENT_NAME:    ${{ github.event_name }}
           EVENT_ACTION:  ${{ github.event.action }}
           HEAD_REF:      ${{ github.event.pull_request.head.ref }}
-          PR_TITLE:      ${{ github.event.pull_request.title }}
           PR_NUMBER:     ${{ github.event.pull_request.number }}
           PR_AUTHOR:     ${{ github.event.pull_request.user.login }}
+          MOVED_TO_REVIEW: ${{ needs.jira-guard.outputs.moved_to_review }}
+          REQUESTED_REVIEWER: ${{ github.event.requested_reviewer.login }}
+          PENDING_REVIEWERS: ${{ join(github.event.pull_request.requested_reviewers.*.login, ',') }}
+          GH_TOKEN:      ${{ github.token }}
+          REPO:          ${{ github.repository }}
           REVIEW_STATE:  ${{ github.event.review.state }}
           REVIEWER:      ${{ github.event.review.user.login }}
           HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
@@ -672,7 +677,7 @@ jobs:
           JIRA_DOMAIN:   ${{ inputs.jira_domain }}
         run: |
           python3 - << 'PYEOF'
-          import json, os, re, urllib.request, urllib.parse, base64
+          import json, os, re, urllib.error, urllib.request, urllib.parse, base64
 
           event = os.environ.get("EVENT_NAME", "")
           action = os.environ.get("EVENT_ACTION", "")
@@ -682,93 +687,103 @@ jobs:
               m = re.match(r"^([A-Z]+-[0-9]+)(-|$)", ref or "")
               return m.group(1) if m else ""
 
+          def api_get(url, headers):
+              req = urllib.request.Request(url, headers={**headers, "Accept": "application/json"})
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  return json.loads(resp.read().decode())
+
+          def gh_get(path):
+              return api_get(
+                  f"https://api.github.com/{path}",
+                  {"Authorization": f"Bearer {os.environ.get('GH_TOKEN', '')}"},
+              )
+
           def resolve_mention(github_login):
-              """Map GitHub login → Jira accountId/displayName via user search."""
-              if not github_login:
-                  return "", ""
+              """Map a GitHub login to a Jira {id, name}, or None when no confident match.
+
+              Never guesses: pinging the wrong person is worse than not pinging.
+              """
               email = os.environ.get("JIRA_EMAIL", "")
               token = os.environ.get("JIRA_TOKEN", "")
               domain = os.environ.get("JIRA_DOMAIN", "")
-              if not (email and token and domain):
-                  return "", ""
-              q = urllib.parse.urlencode({"query": github_login})
-              url = f"https://{domain}/rest/api/3/user/search?{q}"
+              if not (github_login and email and token and domain):
+                  return None
               creds = base64.b64encode(f"{email}:{token}".encode()).decode()
-              req = urllib.request.Request(
-                  url,
-                  headers={"Authorization": f"Basic {creds}", "Accept": "application/json"},
-              )
+              jira_headers = {"Authorization": f"Basic {creds}"}
               try:
-                  with urllib.request.urlopen(req, timeout=15) as resp:
-                      users = json.loads(resp.read().decode())
-              except Exception as e:
+                  full_name = (gh_get(f"users/{github_login}").get("name") or "").strip()
+                  queries = [q for q in (full_name, github_login) if q]
+                  login_l = github_login.lower()
+                  for q in queries:
+                      users = api_get(
+                          f"https://{domain}/rest/api/3/user/search?{urllib.parse.urlencode({'query': q})}",
+                          jira_headers,
+                      )
+                      for u in users:
+                          name = (u.get("displayName") or "").lower()
+                          local = (u.get("emailAddress") or "").lower().split("@")[0]
+                          if name == full_name.lower() or login_l in (name, local):
+                              return {"id": u["accountId"], "name": u["displayName"]}
+              except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
                   print(f"⚠️  mention resolve failed for {github_login}: {e}")
-                  return "", ""
-              if not users:
-                  return "", ""
-              # Prefer exact email-local-part / displayName contains login
-              login_l = github_login.lower()
-              pick = users[0]
-              for u in users:
-                  name = (u.get("displayName") or "").lower()
-                  em = (u.get("emailAddress") or "").lower()
-                  if login_l in name or login_l in em.split("@")[0]:
-                      pick = u
-                      break
-              return pick.get("accountId") or "", pick.get("displayName") or ""
+              return None
 
-          def add(key, body, mention_login=""):
+          def reviewers_to_ping(pr_number):
+              """Who must act next: the requested reviewer, else pending ones, else the last reviewer."""
+              if os.environ.get("REQUESTED_REVIEWER"):
+                  return [os.environ["REQUESTED_REVIEWER"]]
+              pending = [r for r in os.environ.get("PENDING_REVIEWERS", "").split(",") if r]
+              if pending:
+                  return pending
+              try:
+                  reviews = gh_get(f"repos/{os.environ.get('REPO', '')}/pulls/{pr_number}/reviews")
+              except (urllib.error.URLError, json.JSONDecodeError) as e:
+                  print(f"⚠️  could not list reviews: {e}")
+                  return []
+              last = next((r["user"]["login"] for r in reversed(reviews) if r.get("user")), "")
+              return [last] if last else []
+
+          def add(key, body, mention_logins=()):
+              """Empty mention_logins → AdolfoBOT pings the Jira assignee (the developer)."""
               if not key:
                   return
-              mid, mname = resolve_mention(mention_login) if mention_login else ("", "")
               entry = {"jira_key": key, "comment_body": body}
-              if mid:
-                  entry["mention_account_id"] = mid
-                  entry["mention_display_name"] = mname
+              mentions = [m for m in map(resolve_mention, mention_logins) if m]
+              if mentions:
+                  entry["mentions"] = mentions
               comments.append(entry)
 
+          pr_number = os.environ.get("PR_NUMBER", "")
+          key = key_from(os.environ.get("HEAD_REF", ""))
+
           if event == "pull_request":
-              # Only comment on real open/reopen — not synchronize / review_requested.
-              if action in ("opened", "reopened") and os.environ.get("PR_AUTHOR") != "dependabot[bot]":
-                  key = key_from(os.environ.get("HEAD_REF", ""))
-                  add(
-                      key,
-                      f"PR #{os.environ.get('PR_NUMBER')} → Review.",
-                      os.environ.get("PR_AUTHOR", ""),
-                  )
+              # Comment only when the ticket really moved to Review (open, or a
+              # push/re-request after changes) and tag whoever must review next.
+              if os.environ.get("MOVED_TO_REVIEW") == "true" and os.environ.get("PR_AUTHOR") != "dependabot[bot]":
+                  back = action == "synchronize"
+                  body = f"PR #{pr_number} updated → back in Review." if back else f"PR #{pr_number} → Review."
+                  add(key, body, reviewers_to_ping(pr_number))
 
           elif event == "pull_request_review":
-              key = key_from(os.environ.get("HEAD_REF", ""))
               state = os.environ.get("REVIEW_STATE", "")
               reviewer = os.environ.get("REVIEWER", "")
-              author = os.environ.get("PR_AUTHOR", "")
               if state == "changes_requested":
-                  body = f"Changes requested by {reviewer} → In Progress."
+                  body = f"{reviewer} requested changes on PR #{pr_number} → In Progress."
                   evt_path = os.environ.get("GITHUB_EVENT_PATH", "")
                   if evt_path and os.path.exists(evt_path):
                       with open(evt_path) as f:
                           evt = json.load(f)
                       note = ((evt.get("review") or {}).get("body") or "").strip()
                       if note:
-                          if len(note) > 280:
-                              note = note[:277] + "..."
-                          body += f" {note}"
-                  add(key, body, author)  # notify the developer (PR author)
+                          body += "\n" + (note if len(note) <= 200 else note[:197] + "...")
+                  add(key, body)
               elif state == "approved":
-                  add(
-                      key,
-                      f"Approved by {reviewer} → Ready To Deploy.",
-                      author,
-                  )
+                  add(key, f"{reviewer} approved PR #{pr_number} → Ready To Deploy.")
 
           elif event == "push":
               m = re.search(r"([A-Z]+-[0-9]+)", os.environ.get("HEAD_COMMIT_MSG", "") or "")
               if m:
-                  add(
-                      m.group(1),
-                      f"Merged to {os.environ.get('REF')} → Done.",
-                      "",
-                  )
+                  add(m.group(1), f"Merged to {os.environ.get('REF')} → Done.")
 
           gh = os.environ.get("GITHUB_OUTPUT", "")
           if gh:

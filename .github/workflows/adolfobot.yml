@@ -97,7 +97,7 @@ on:
         type: string
         default: ""
       comments_json:
-        description: "Bulk mode: JSON array of {\"jira_key\": ..., \"comment_body\": ...}. When set, every entry is posted as its own comment in a single run (jira_key_override/comment_body are ignored)."
+        description: "Bulk mode: JSON array of {\"jira_key\": ..., \"comment_body\": ..., \"mentions\": [{\"id\": accountId, \"name\": displayName}] (optional; default = Jira assignee)}. When set, every entry is posted as its own comment in a single run (jira_key_override/comment_body are ignored)."
         type: string
         default: ""
       jira_domain:
@@ -289,45 +289,38 @@ jobs:
           def link(text, href): return t(text, {"type": "link", "attrs": {"href": href}})
           def mention(uid, name): return {"type": "mention", "attrs": {"id": uid, "text": f"@{name}"}}
           def p(*nodes): return {"type": "paragraph", "content": list(nodes)}
-          def rule(): return {"type": "rule"}
+          def mention_nodes(mentions):
+            nodes = []
+            for m in mentions:
+              nodes += [mention(m["id"], m["name"]), t(" ")]
+            return nodes
 
-          def hard_break():
-            return {"type": "hardBreak"}
+          def lines_of(text):
+            return [l.strip() for l in text.split("\n") if l.strip()]
 
-          def build_content(target_key, body, mention_id="", mention_name=""):
-            # Compact: one header line + one body paragraph (hardBreaks, not N paragraphs).
-            mid = mention_id or ASSIGNEE_ID
-            mname = mention_name or ASSIGNEE_NAME
-            header = [t("[AdolfoBOT]")]
-            if mid:
-              header += [t(" "), mention(mid, mname)]
-            content = [p(*header)]
-
+          def build_content(body, mentions):
+            # At most two lines: the headline (who + what), then one detail line.
+            # No explicit mention → ping the Jira assignee (the developer).
+            if not mentions and ASSIGNEE_ID:
+              mentions = [{"id": ASSIGNEE_ID, "name": ASSIGNEE_NAME}]
+            who = mention_nodes(mentions)
             if MODE == "comment":
-              nodes = []
-              lines = body.split("\n")
-              for i, line in enumerate(lines):
-                if i:
-                  nodes.append(hard_break())
-                nodes.append(t(line if line else " "))
-              content.append(p(*nodes) if nodes else p(t(" ")))
-            else:
-              content.append(p(t("❌ "), bold(WORKFLOW), t(" failed.")))
-              content.append(p(link("View run", RUN_URL)))
-              if EXTRA.strip():
-                extra_nodes = []
-                for i, line in enumerate(EXTRA.split("\n")):
-                  if not line.strip():
-                    continue
-                  if extra_nodes:
-                    extra_nodes.append(hard_break())
-                  extra_nodes.append(t(line))
-                if extra_nodes:
-                  content.append(p(*extra_nodes))
-            return content
+              lines = lines_of(body)
+              headline = [t("🤖 ")] + who + [t(lines[0] if lines else " ")]
+              detail = " · ".join(lines[1:])
+              content = [p(*headline)]
+              if detail:
+                content.append(p(t(detail)))
+              return content
+            headline = [t("❌ ")] + who + [bold(WORKFLOW), t(" failed → In Progress.")]
+            detail = [link("View run", RUN_URL)]
+            extra = " · ".join(lines_of(EXTRA))
+            if extra:
+              detail.append(t(" · " + extra))
+            return [p(*headline), p(*detail)]
 
-          def post_comment(target_key, body, mention_id="", mention_name=""):
-            adf = {"version": 1, "type": "doc", "content": build_content(target_key, body, mention_id, mention_name)}
+          def post_comment(target_key, body, mentions):
+            adf = {"version": 1, "type": "doc", "content": build_content(body, mentions)}
             payload = json.dumps({"body": adf}).encode()
             creds = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_TOKEN}".encode()).decode()
             req = urllib.request.Request(
@@ -360,15 +353,10 @@ jobs:
               key = entry.get("jira_key", "")
               body = entry.get("comment_body", "")
               if key:
-                post_comment(
-                  key,
-                  body,
-                  entry.get("mention_account_id", ""),
-                  entry.get("mention_display_name", ""),
-                )
+                post_comment(key, body, entry.get("mentions", []))
           else:
             if JIRA_KEY:
-              post_comment(JIRA_KEY, BODY)
+              post_comment(JIRA_KEY, BODY, [])
           PYEOF
 
       # ── 5 · Step summary ─────────────────────────────────────────────────
