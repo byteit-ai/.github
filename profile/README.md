@@ -1,8 +1,7 @@
 <div align="center">
   <a href="https://www.byteit.ai">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/lockup-on-dark.svg">
-      <img src="assets/lockup-on-light.svg" alt="ByteIt" height="64">
+      <img src="https://www.byteit.ai/images/logo_light_transparent.webp" alt="ByteIT Logo" height="80" />
     </picture>
   </a>
   <h3>Liberate data from documents.</h3>
